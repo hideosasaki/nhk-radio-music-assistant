@@ -1,0 +1,13 @@
+{
+    "type": "music",
+    "domain": "nhk_radio_ma",
+    "stage": "experimental",
+    "name": "NHK Radio",
+    "description": "Listen to NHK Radio live broadcasts and on-demand programs.",
+    "codeowners": ["@hideosasaki"],
+    "requirements": [
+        "nhk-radio-python @ git+https://github.com/hideosasaki/nhk-radio-python.git"
+    ],
+    "multi_instance": false,
+    "icon": "radio"
+}

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nhk-radio-music-assistant"
+version = "0.1.0"
+description = "NHK Radio provider for Music Assistant"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "nhk-radio-python @ git+https://github.com/hideosasaki/nhk-radio-python.git",
+    "music-assistant-models>=1.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
