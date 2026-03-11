@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncGenerator, Sequence
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from music_assistant_models.enums import (
     ContentType,
     ImageType,
@@ -356,6 +359,12 @@ class NhkRadioProvider(MusicProvider):
 
     # --- Stream ---
 
+    # NHK on-demand uses AES-128 encrypted HE-AAC HLS at 48kbps.
+    # ffmpeg's HLS demuxer produces intermittent decode errors causing audible
+    # glitches.  We use StreamType.CUSTOM to download and decrypt HLS segments
+    # ourselves, yielding raw ADTS/AAC bytes so ffmpeg only needs to decode
+    # a plain byte stream (no HLS protocol handling).
+
     async def get_stream_details(
         self, item_id: str, media_type: MediaType = MediaType.RADIO
     ) -> StreamDetails:
@@ -391,21 +400,7 @@ class NhkRadioProvider(MusicProvider):
                 msg = f"No episodes for series: {item_id}"
                 raise ValueError(msg)
             ep = episodes[0]
-            return StreamDetails(
-                provider=DOMAIN,
-                item_id=item_id,
-                audio_format=AudioFormat(content_type=ContentType.AAC),
-                media_type=MediaType.RADIO,
-                stream_type=StreamType.HLS,
-                path=ep.stream_url,
-                can_seek=False,
-                allow_seek=False,
-                stream_metadata=StreamMetadata(
-                    title=ep.series_name,
-                    description=ep.title,
-                    image_url=ep.thumbnail_url,
-                ),
-            )
+            return self._ondemand_stream_details(item_id, ep)
 
         # od: → play specific episode
         if item_id.startswith("od:"):
@@ -419,26 +414,114 @@ class NhkRadioProvider(MusicProvider):
             for i, ep in enumerate(episodes):
                 eid = ep.episode_id if ep.episode_id else str(i)
                 if eid == episode_key:
-                    return StreamDetails(
-                        provider=DOMAIN,
-                        item_id=item_id,
-                        audio_format=AudioFormat(content_type=ContentType.AAC),
-                        media_type=MediaType.RADIO,
-                        stream_type=StreamType.HLS,
-                        path=ep.stream_url,
-                        can_seek=False,
-                        allow_seek=False,
-                        stream_metadata=StreamMetadata(
-                            title=ep.series_name,
-                            description=ep.title,
-                            image_url=ep.thumbnail_url,
-                        ),
-                    )
+                    return self._ondemand_stream_details(item_id, ep)
             msg = f"Episode not found: {item_id}"
             raise ValueError(msg)
 
         msg = f"Unknown item: {item_id}"
         raise ValueError(msg)
+
+    # --- Stream Helpers ---
+
+    def _ondemand_stream_details(
+        self, item_id: str, ep: OndemandProgram
+    ) -> StreamDetails:
+        """Build StreamDetails for an on-demand episode."""
+        duration = int((ep.end_at - ep.start_at).total_seconds())
+        return StreamDetails(
+            provider=DOMAIN,
+            item_id=item_id,
+            audio_format=AudioFormat(content_type=ContentType.AAC),
+            media_type=MediaType.TRACK,
+            stream_type=StreamType.CUSTOM,
+            duration=duration if duration > 0 else None,
+            data=ep.stream_url,
+            can_seek=False,
+            allow_seek=False,
+            stream_metadata=StreamMetadata(
+                title=ep.series_name,
+                description=ep.title,
+                image_url=ep.thumbnail_url,
+            ),
+        )
+
+    async def get_audio_stream(
+        self, streamdetails: StreamDetails, seek_position: int = 0
+    ) -> AsyncGenerator[bytes, None]:
+        """Yield raw AAC bytes from NHK on-demand HLS stream.
+
+        Downloads the HLS playlist, fetches the AES-128 key, then
+        downloads and decrypts each segment, yielding raw bytes.
+        """
+        master_url: str = streamdetails.data
+        session = self.mass.http_session
+
+        # 1. Resolve master playlist → sub-playlist URL
+        async with session.get(master_url) as resp:
+            resp.raise_for_status()
+            master_text = await resp.text()
+
+        sub_url: str | None = None
+        for line in master_text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                sub_url = urljoin(master_url, line)
+                break
+        if not sub_url:
+            self.logger.error("No sub-playlist found in master: %s", master_url)
+            return
+
+        # 2. Fetch sub-playlist
+        async with session.get(sub_url) as resp:
+            resp.raise_for_status()
+            playlist_text = await resp.text()
+
+        # 3. Parse encryption key and segment URLs
+        key_url: str | None = None
+        iv: bytes | None = None
+        segments: list[str] = []
+
+        for line in playlist_text.splitlines():
+            line = line.strip()
+            if line.startswith("#EXT-X-KEY:"):
+                m = re.search(r'URI="([^"]+)"', line)
+                if m:
+                    key_url = urljoin(sub_url, m.group(1))
+                m_iv = re.search(r"IV=0x([0-9a-fA-F]+)", line)
+                iv = bytes.fromhex(m_iv.group(1)) if m_iv else None
+            elif line and not line.startswith("#"):
+                segments.append(urljoin(sub_url, line))
+
+        # 4. Fetch decryption key
+        key: bytes | None = None
+        if key_url:
+            async with session.get(key_url) as resp:
+                resp.raise_for_status()
+                key = await resp.read()
+
+        # 5. Download, decrypt, and yield each segment
+        for seq, seg_url in enumerate(segments):
+            try:
+                async with session.get(seg_url) as resp:
+                    resp.raise_for_status()
+                    data = await resp.read()
+            except Exception:
+                self.logger.warning("Failed to download segment %d", seq)
+                continue
+
+            if key:
+                # IV defaults to segment sequence number (big-endian 16 bytes)
+                seg_iv = iv if iv else seq.to_bytes(16, "big")
+                cipher = Cipher(algorithms.AES(key), modes.CBC(seg_iv))
+                decryptor = cipher.decryptor()
+                data = decryptor.update(data) + decryptor.finalize()
+                # Remove PKCS#7 padding
+                if data:
+                    pad_len = data[-1]
+                    if 0 < pad_len <= 16:
+                        data = data[:-pad_len]
+
+            yield data
 
     # --- Radio Parsing Helpers ---
 

@@ -116,17 +116,17 @@ async def test_stream_details_live(provider: NhkRadioProvider) -> None:
 
 
 async def test_stream_details_ondemand(provider: NhkRadioProvider) -> None:
-    """On-demand stream returns HLS with correct URL."""
+    """On-demand stream returns CUSTOM with URL in data."""
     details = await provider.get_stream_details("od:F684/01/ep001")
-    assert details.stream_type == StreamType.HLS
-    assert "ondemand" in details.path
+    assert details.stream_type == StreamType.CUSTOM
+    assert "ondemand" in details.data
     assert details.stream_metadata is not None
 
 
 async def test_stream_details_series(provider: NhkRadioProvider) -> None:
     """Series stream returns latest episode."""
     details = await provider.get_stream_details("series:F684/01")
-    assert details.stream_type == StreamType.HLS
+    assert details.stream_type == StreamType.CUSTOM
     assert details.stream_metadata is not None
     assert details.stream_metadata.title == "テストシリーズ"
 

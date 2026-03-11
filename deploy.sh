@@ -1,13 +1,13 @@
 #!/bin/bash
 # Deploy NHK Radio provider to Music Assistant Docker container.
 #
-# Usage: ./deploy.sh [SSH_HOST]
-#   SSH_HOST defaults to "sasaki@192.168.0.2"
-#   Set to "local" for local Docker.
+# Usage: ./deploy.sh <SSH_HOST|local>
+#   SSH_HOST: user@hostname for remote Docker host
+#   "local": for local Docker.
 
 set -euo pipefail
 
-SSH_HOST="${1:-sasaki@192.168.0.2}"
+SSH_HOST="${1:?Usage: ./deploy.sh <SSH_HOST|local>}"
 CONTAINER="music-assistant"
 PROVIDER_DIR="nhk_radio_ma"
 FILES="__init__.py manifest.json const.py _stub.py"
