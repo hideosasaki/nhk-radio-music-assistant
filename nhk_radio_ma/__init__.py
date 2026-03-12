@@ -23,6 +23,7 @@ from music_assistant_models.media_items import (
     ProviderMapping,
     Radio,
     SearchResults,
+    Track,
     UniqueList,
 )
 from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
@@ -112,7 +113,7 @@ class NhkRadioProvider(MusicProvider):
 
     # --- Browse ---
 
-    async def browse(self, path: str) -> Sequence[Radio | BrowseFolder]:
+    async def browse(self, path: str) -> Sequence[Radio | Track | BrowseFolder]:
         """Browse NHK Radio content."""
         # Strip provider prefix if present
         if path.startswith(f"{DOMAIN}://"):
@@ -246,13 +247,13 @@ class NhkRadioProvider(MusicProvider):
 
     async def _browse_episodes(
         self, series_site_id: str, corner_site_id: str
-    ) -> list[Radio]:
-        """Return episodes as Radio items."""
+    ) -> list[Track]:
+        """Return episodes as Track items."""
         episodes = await self._client.get_ondemand_programs(
             series_site_id, corner_site_id
         )
         return [
-            self._parse_ondemand_radio(ep, series_site_id, corner_site_id, i)
+            self._parse_ondemand_track(ep, series_site_id, corner_site_id, i)
             for i, ep in enumerate(episodes)
         ]
 
@@ -274,6 +275,30 @@ class NhkRadioProvider(MusicProvider):
             for series in series_list[:limit]
         ]
         return SearchResults(radio=radios)
+
+    # --- Track (on-demand) ---
+
+    async def get_track(self, prov_track_id: str) -> Track:
+        """Get a single on-demand track by ID."""
+        if prov_track_id.startswith("od:"):
+            rest = prov_track_id.removeprefix("od:")
+            parts = rest.split("/")
+            series_site_id, corner_site_id = parts[0], parts[1]
+            episode_key = parts[2]
+            episodes = await self._client.get_ondemand_programs(
+                series_site_id, corner_site_id
+            )
+            for i, ep in enumerate(episodes):
+                eid = ep.episode_id if ep.episode_id else str(i)
+                if eid == episode_key:
+                    return self._parse_ondemand_track(
+                        ep, series_site_id, corner_site_id, i
+                    )
+            msg = f"Episode not found: {prov_track_id}"
+            raise ValueError(msg)
+
+        msg = f"Unknown track ID: {prov_track_id}"
+        raise ValueError(msg)
 
     # --- Library ---
 
@@ -304,29 +329,11 @@ class NhkRadioProvider(MusicProvider):
                 series_site_id, corner_site_id
             )
             if episodes:
-                radio = self._parse_ondemand_radio(
-                    episodes[0], series_site_id, corner_site_id, 0
+                radio = self._parse_series_radio_from_episode(
+                    episodes[0], prov_radio_id
                 )
-                radio.item_id = prov_radio_id
                 return radio
             msg = f"No episodes for series: {prov_radio_id}"
-            raise ValueError(msg)
-
-        if prov_radio_id.startswith("od:"):
-            rest = prov_radio_id.removeprefix("od:")
-            parts = rest.split("/")
-            series_site_id, corner_site_id = parts[0], parts[1]
-            episode_key = parts[2]
-            episodes = await self._client.get_ondemand_programs(
-                series_site_id, corner_site_id
-            )
-            for i, ep in enumerate(episodes):
-                eid = ep.episode_id if ep.episode_id else str(i)
-                if eid == episode_key:
-                    return self._parse_ondemand_radio(
-                        ep, series_site_id, corner_site_id, i
-                    )
-            msg = f"Episode not found: {prov_radio_id}"
             raise ValueError(msg)
 
         msg = f"Unknown radio ID: {prov_radio_id}"
@@ -436,8 +443,8 @@ class NhkRadioProvider(MusicProvider):
             stream_type=StreamType.CUSTOM,
             duration=duration if duration > 0 else None,
             data=ep.stream_url,
-            can_seek=False,
-            allow_seek=False,
+            can_seek=True,
+            allow_seek=True,
             stream_metadata=StreamMetadata(
                 title=ep.series_name,
                 description=ep.title,
@@ -476,10 +483,11 @@ class NhkRadioProvider(MusicProvider):
             resp.raise_for_status()
             playlist_text = await resp.text()
 
-        # 3. Parse encryption key and segment URLs
+        # 3. Parse encryption key, segment durations, and segment URLs
         key_url: str | None = None
         iv: bytes | None = None
-        segments: list[str] = []
+        segments: list[tuple[float, str]] = []
+        pending_duration: float = 0.0
 
         for line in playlist_text.splitlines():
             line = line.strip()
@@ -489,8 +497,14 @@ class NhkRadioProvider(MusicProvider):
                     key_url = urljoin(sub_url, m.group(1))
                 m_iv = re.search(r"IV=0x([0-9a-fA-F]+)", line)
                 iv = bytes.fromhex(m_iv.group(1)) if m_iv else None
+            elif line.startswith("#EXTINF:"):
+                try:
+                    pending_duration = float(line.split(":")[1].split(",")[0])
+                except (IndexError, ValueError):
+                    pending_duration = 0.0
             elif line and not line.startswith("#"):
-                segments.append(urljoin(sub_url, line))
+                segments.append((pending_duration, urljoin(sub_url, line)))
+                pending_duration = 0.0
 
         # 4. Fetch decryption key
         key: bytes | None = None
@@ -499,8 +513,22 @@ class NhkRadioProvider(MusicProvider):
                 resp.raise_for_status()
                 key = await resp.read()
 
-        # 5. Download, decrypt, and yield each segment
-        for seq, seg_url in enumerate(segments):
+        # 5. Skip segments before seek position
+        start_index = 0
+        if seek_position > 0:
+            cumulative = 0.0
+            for i, (dur, _) in enumerate(segments):
+                if cumulative + dur > seek_position:
+                    start_index = i
+                    break
+                cumulative += dur
+            else:
+                start_index = len(segments)
+
+        # 6. Download, decrypt, and yield each segment
+        for seq, (_dur, seg_url) in enumerate(
+            segments[start_index:], start=start_index
+        ):
             try:
                 async with session.get(seg_url) as resp:
                     resp.raise_for_status()
@@ -556,20 +584,54 @@ class NhkRadioProvider(MusicProvider):
         )
         return radio
 
-    def _parse_ondemand_radio(
+    def _parse_ondemand_track(
         self,
         ep: OndemandProgram,
         series_site_id: str,
         corner_site_id: str,
         index: int,
-    ) -> Radio:
-        """Convert OndemandProgram to a Radio item."""
+    ) -> Track:
+        """Convert OndemandProgram to a Track item."""
         episode_key = ep.episode_id if ep.episode_id else str(index)
         item_id = f"od:{series_site_id}/{corner_site_id}/{episode_key}"
-        radio = Radio(
+        duration = int((ep.end_at - ep.start_at).total_seconds())
+        track = Track(
             item_id=item_id,
             provider=DOMAIN,
             name=ep.title,
+            duration=max(duration, 0),
+            provider_mappings={
+                ProviderMapping(
+                    item_id=item_id,
+                    provider_domain=DOMAIN,
+                    provider_instance=self.instance_id,
+                )
+            },
+        )
+        images: list[MediaItemImage] = []
+        if ep.thumbnail_url:
+            images.append(
+                MediaItemImage(
+                    type=ImageType.THUMB,
+                    path=ep.thumbnail_url,
+                    provider=DOMAIN,
+                    remotely_accessible=True,
+                )
+            )
+        track.metadata = MediaItemMetadata(
+            description=ep.description,
+            images=UniqueList(images) if images else None,
+        )
+        return track
+
+    def _parse_series_radio_from_episode(
+        self, ep: OndemandProgram, item_id: str
+    ) -> Radio:
+        """Build a Radio item for a series using episode info."""
+        radio = Radio(
+            item_id=item_id,
+            provider=DOMAIN,
+            name=ep.series_name,
             provider_mappings={
                 ProviderMapping(
                     item_id=item_id,
@@ -589,7 +651,7 @@ class NhkRadioProvider(MusicProvider):
                 )
             )
         radio.metadata = MediaItemMetadata(
-            description=ep.description,
+            description=ep.title,
             images=UniqueList(images) if images else None,
         )
         return radio

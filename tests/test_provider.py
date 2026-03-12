@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from music_assistant_models.enums import ContentType, MediaType, StreamType
-from music_assistant_models.media_items import BrowseFolder, ProviderMapping, Radio
+from music_assistant_models.media_items import BrowseFolder, ProviderMapping, Radio, Track
 
 from nhk_radio_ma import NhkRadioProvider
 from nhk_radio_ma.const import CONF_STORED_RADIOS, DOMAIN
@@ -61,12 +61,13 @@ async def test_browse_new_series_list(provider: NhkRadioProvider) -> None:
 
 
 async def test_browse_series_episodes(provider: NhkRadioProvider) -> None:
-    """Series path returns episodes as Radio items."""
+    """Series path returns episodes as Track items."""
     result = await provider.browse(f"{DOMAIN}://new/F684_01")
     assert len(result) == 2
-    assert all(isinstance(r, Radio) for r in result)
+    assert all(isinstance(r, Track) for r in result)
     assert result[0].item_id == "od:F684/01/ep001"
     assert result[1].item_id == "od:F684/01/ep002"
+    assert result[0].duration == 1800  # 30 minutes
 
 
 async def test_browse_genre_list(provider: NhkRadioProvider) -> None:
@@ -102,25 +103,49 @@ async def test_search_wrong_media_type(provider: NhkRadioProvider) -> None:
     assert len(results.radio) == 0
 
 
+# --- Track (on-demand) ---
+
+
+async def test_get_track(provider: NhkRadioProvider) -> None:
+    """get_track returns a Track for an on-demand episode."""
+    track = await provider.get_track("od:F684/01/ep001")
+    assert isinstance(track, Track)
+    assert track.item_id == "od:F684/01/ep001"
+    assert track.duration == 1800
+
+
+async def test_get_track_unknown(provider: NhkRadioProvider) -> None:
+    """get_track raises ValueError for unknown ID."""
+    with pytest.raises(ValueError, match="Unknown track"):
+        await provider.get_track("live:r1")
+
+
 # --- Stream Details ---
 
 
 async def test_stream_details_live(provider: NhkRadioProvider) -> None:
-    """Live stream returns HLS with correct URL and metadata."""
+    """Live stream returns HLS with correct URL, metadata, and no seek."""
     details = await provider.get_stream_details("live:r1")
     assert details.stream_type == StreamType.HLS
+    assert details.media_type == MediaType.RADIO
     assert details.audio_format.content_type == ContentType.AAC
     assert "r1" in details.path
     assert details.stream_metadata is not None
     assert details.stream_metadata.title == "テスト番組"
+    assert details.can_seek is False
+    assert details.allow_seek is False
 
 
 async def test_stream_details_ondemand(provider: NhkRadioProvider) -> None:
-    """On-demand stream returns CUSTOM with URL in data."""
+    """On-demand stream returns CUSTOM with URL in data and seek enabled."""
     details = await provider.get_stream_details("od:F684/01/ep001")
     assert details.stream_type == StreamType.CUSTOM
+    assert details.media_type == MediaType.TRACK
     assert "ondemand" in details.data
     assert details.stream_metadata is not None
+    assert details.can_seek is True
+    assert details.allow_seek is True
+    assert details.duration == 1800
 
 
 async def test_stream_details_series(provider: NhkRadioProvider) -> None:
