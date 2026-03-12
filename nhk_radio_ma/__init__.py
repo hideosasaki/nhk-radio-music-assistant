@@ -16,8 +16,10 @@ from music_assistant_models.enums import (
     StreamType,
 )
 from music_assistant_models.media_items import (
+    Artist,
     AudioFormat,
     BrowseFolder,
+    ItemMapping,
     MediaItemImage,
     MediaItemMetadata,
     ProviderMapping,
@@ -299,6 +301,21 @@ class NhkRadioProvider(MusicProvider):
 
         msg = f"Unknown track ID: {prov_track_id}"
         raise ValueError(msg)
+
+    async def get_artist(self, prov_artist_id: str) -> Artist:
+        """Get artist details by id."""
+        return Artist(
+            item_id=prov_artist_id,
+            provider=DOMAIN,
+            name=prov_artist_id,
+            provider_mappings={
+                ProviderMapping(
+                    item_id=prov_artist_id,
+                    provider_domain=DOMAIN,
+                    provider_instance=self.instance_id,
+                )
+            },
+        )
 
     # --- Library ---
 
@@ -595,6 +612,7 @@ class NhkRadioProvider(MusicProvider):
         episode_key = ep.episode_id if ep.episode_id else str(index)
         item_id = f"od:{series_site_id}/{corner_site_id}/{episode_key}"
         duration = int((ep.end_at - ep.start_at).total_seconds())
+        artist_name = ep.act or ep.series_name
         track = Track(
             item_id=item_id,
             provider=DOMAIN,
@@ -607,6 +625,16 @@ class NhkRadioProvider(MusicProvider):
                     provider_instance=self.instance_id,
                 )
             },
+            artists=UniqueList(
+                [
+                    ItemMapping(
+                        media_type=MediaType.ARTIST,
+                        item_id=artist_name,
+                        provider=DOMAIN,
+                        name=artist_name,
+                    )
+                ]
+            ),
         )
         images: list[MediaItemImage] = []
         if ep.thumbnail_url:

@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "nhk-radio-python @ git+https://github.com/hideosasaki/nhk-radio-python.git",
     "music-assistant-models>=1.1.0",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

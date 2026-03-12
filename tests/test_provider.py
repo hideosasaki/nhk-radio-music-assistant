@@ -112,6 +112,8 @@ async def test_get_track(provider: NhkRadioProvider) -> None:
     assert isinstance(track, Track)
     assert track.item_id == "od:F684/01/ep001"
     assert track.duration == 1800
+    assert len(track.artists) == 1
+    assert track.artists[0].name == "出演者"
 
 
 async def test_get_track_unknown(provider: NhkRadioProvider) -> None:
