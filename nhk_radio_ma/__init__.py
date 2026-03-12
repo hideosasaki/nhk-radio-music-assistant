@@ -576,7 +576,7 @@ class NhkRadioProvider(MusicProvider):
         radio = Radio(
             item_id=f"live:{info.channel.id}",
             provider=DOMAIN,
-            name=f"{info.channel.name} - {program.series_name}",
+            name=f"NHK {info.area.name} {info.channel.name}",
             provider_mappings={
                 ProviderMapping(
                     item_id=f"live:{info.channel.id}",
@@ -585,19 +585,8 @@ class NhkRadioProvider(MusicProvider):
                 )
             },
         )
-        images: list[MediaItemImage] = []
-        if program.thumbnail_url:
-            images.append(
-                MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=program.thumbnail_url,
-                    provider=DOMAIN,
-                    remotely_accessible=True,
-                )
-            )
         radio.metadata = MediaItemMetadata(
             description=program.title,
-            images=UniqueList(images) if images else None,
         )
         return radio
 
