@@ -149,7 +149,9 @@ async def test_stream_details_live(provider: NhkRadioProvider) -> None:
     assert details.audio_format.content_type == ContentType.AAC
     assert "r1" in details.path
     assert details.stream_metadata is not None
-    assert details.stream_metadata.title == "テスト番組"
+    assert details.stream_metadata.title == "テストタイトル"
+    assert details.stream_metadata.album == "テスト番組"
+    assert details.stream_metadata.artist == "テスト説明"
     assert details.stream_metadata.image_url == "https://nhk.jp/thumb.jpg"
     assert details.can_seek is False
     assert details.allow_seek is False
@@ -166,7 +168,9 @@ async def test_live_metadata_update_on_program_change(
 
     # Start with initial program
     details = await provider.get_stream_details("live:r1")
-    assert details.stream_metadata.title == "テスト番組"
+    assert details.stream_metadata.title == "テストタイトル"
+    assert details.stream_metadata.album == "テスト番組"
+    assert details.stream_metadata.artist == "テスト説明"
     assert details.stream_metadata.image_url == "https://nhk.jp/thumb.jpg"
 
     # Simulate on_live_program_change updating the cache
@@ -189,8 +193,9 @@ async def test_live_metadata_update_on_program_change(
     await details.stream_metadata_update_callback(details, 10)
 
     # Verify metadata is updated from cache
-    assert details.stream_metadata.title == "次の番組"
-    assert details.stream_metadata.description == "次のタイトル"
+    assert details.stream_metadata.title == "次のタイトル"
+    assert details.stream_metadata.album == "次の番組"
+    assert details.stream_metadata.artist == "テスト説明"
     assert details.stream_metadata.image_url == "https://nhk.jp/next_thumb.jpg"
 
 
@@ -292,7 +297,10 @@ async def test_stream_details_series(provider: NhkRadioProvider) -> None:
     details = await provider.get_stream_details("series:F684/01")
     assert details.stream_type == StreamType.CUSTOM
     assert details.stream_metadata is not None
-    assert details.stream_metadata.title == "テストシリーズ"
+    assert details.stream_metadata.title == "エピソード1"
+    assert details.stream_metadata.album == "テストシリーズ"
+    assert details.stream_metadata.artist == "エピソード説明"
+    assert details.stream_metadata.description == "シリーズ説明"
 
 
 async def test_stream_details_unknown(provider: NhkRadioProvider) -> None:

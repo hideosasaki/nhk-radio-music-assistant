@@ -468,8 +468,9 @@ class NhkRadioProvider(MusicProvider):
             return
         program = info.present
         streamdetails.stream_metadata = StreamMetadata(
-            title=program.series_name,
-            description=program.title,
+            title=program.title,
+            album=program.series_name,
+            artist=program.description,
             image_url=program.thumbnail_url,
         )
 
@@ -504,8 +505,9 @@ class NhkRadioProvider(MusicProvider):
                 can_seek=False,
                 allow_seek=False,
                 stream_metadata=StreamMetadata(
-                    title=info.present.series_name,
-                    description=info.present.title,
+                    title=info.present.title,
+                    album=info.present.series_name,
+                    artist=info.present.description,
                     image_url=info.present.thumbnail_url,
                 ),
                 stream_metadata_update_callback=self._update_live_metadata,
@@ -515,14 +517,16 @@ class NhkRadioProvider(MusicProvider):
         # series: → play latest episode
         if item_id.startswith("series:"):
             series_site_id, corner_site_id = self._parse_series_id(item_id)
-            _series, episodes = await self._client.get_ondemand_programs(
+            series, episodes = await self._client.get_ondemand_programs(
                 series_site_id, corner_site_id
             )
             if not episodes:
                 msg = f"No episodes for series: {item_id}"
                 raise ValueError(msg)
             ep = episodes[0]
-            return self._ondemand_stream_details(item_id, ep)
+            return self._ondemand_stream_details(
+                item_id, ep, series.description
+            )
 
         # od: → play specific episode
         if item_id.startswith("od:"):
@@ -542,7 +546,10 @@ class NhkRadioProvider(MusicProvider):
     # --- Stream Helpers ---
 
     def _ondemand_stream_details(
-        self, item_id: str, ep: OndemandProgram
+        self,
+        item_id: str,
+        ep: OndemandProgram,
+        series_description: str = "",
     ) -> StreamDetails:
         """Build StreamDetails for an on-demand episode."""
         duration = int((ep.end_at - ep.start_at).total_seconds())
@@ -557,8 +564,10 @@ class NhkRadioProvider(MusicProvider):
             can_seek=True,
             allow_seek=True,
             stream_metadata=StreamMetadata(
-                title=ep.series_name,
-                description=ep.title,
+                title=ep.title,
+                album=ep.series_name,
+                artist=ep.description,
+                description=series_description or None,
                 image_url=ep.thumbnail_url,
             ),
         )
