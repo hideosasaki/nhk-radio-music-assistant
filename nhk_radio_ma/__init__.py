@@ -549,7 +549,7 @@ class NhkRadioProvider(MusicProvider):
             image_url=program.thumbnail_url,
         )
 
-    async def unload(self) -> None:
+    async def unload(self, is_removed: bool = False) -> None:
         """Clean up on provider unload."""
         if self._live_watcher_task and not self._live_watcher_task.done():
             self._live_watcher_task.cancel()
@@ -655,7 +655,7 @@ class NhkRadioProvider(MusicProvider):
         if ep.closed_at:
             cjst = ep.closed_at.astimezone()
             parts.append(f"{cjst.month}/{cjst.day} {cjst.hour}:{cjst.minute:02d}まで")
-        return " - ".join(parts) or None
+        return "〜".join(parts) or None
 
     # --- HLS stream handling ---
 
