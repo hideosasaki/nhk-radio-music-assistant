@@ -700,7 +700,7 @@ class NhkRadioProvider(MusicProvider):
                 )
             },
         )
-        radio.metadata = self._build_metadata(program.title, program.thumbnail_url)
+        radio.metadata = self._build_metadata(program.title, thumbnail_url=None)
         return radio
 
     def _parse_ondemand_track(
