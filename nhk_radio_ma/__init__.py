@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 from datetime import datetime
 from collections.abc import AsyncGenerator, Sequence
@@ -61,6 +62,29 @@ except ImportError:
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigEntry
+
+_LOGO_COLOR_FM = "#B8860B"
+_LOGO_COLOR_AM = "#4682A0"
+_FM_CHANNEL_IDS = frozenset({"fm", "r3"})
+
+
+def _build_channel_logo(channel_id: str, channel_name: str) -> str:
+    """Build an SVG logo for a radio channel and return as a data URI."""
+    is_fm = channel_id in _FM_CHANNEL_IDS or "FM" in channel_name.upper()
+    bg = _LOGO_COLOR_FM if is_fm else _LOGO_COLOR_AM
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400">'
+        f'<rect width="400" height="400" fill="{bg}"/>'
+        '<text x="200" y="145" text-anchor="middle" fill="white"'
+        ' font-family="Arial Black,Helvetica,sans-serif"'
+        ' font-weight="900" font-size="72">NHK</text>'
+        f'<text x="200" y="310" text-anchor="middle" fill="white"'
+        f' font-family="Arial Black,Helvetica,sans-serif"'
+        f' font-weight="900" font-size="180">{channel_name}</text>'
+        '</svg>'
+    )
+    encoded = base64.b64encode(svg.encode()).decode()
+    return f"data:image/svg+xml;base64,{encoded}"
 
 SUPPORTED_FEATURES = {
     ProviderFeature.BROWSE,
@@ -592,11 +616,14 @@ class NhkRadioProvider(MusicProvider):
         if info is None:
             return
         program = info.present
+        image_url = program.thumbnail_url or _build_channel_logo(
+            info.channel.id, info.channel.name
+        )
         streamdetails.stream_metadata = StreamMetadata(
             title=program.title,
             album=program.series_name,
             artist=program.description,
-            image_url=program.thumbnail_url,
+            image_url=image_url,
         )
 
     async def unload(self, is_removed: bool = False) -> None:
@@ -633,7 +660,9 @@ class NhkRadioProvider(MusicProvider):
                     title=info.present.title,
                     album=info.present.series_name,
                     artist=info.present.description,
-                    image_url=info.present.thumbnail_url,
+                    image_url=info.present.thumbnail_url or _build_channel_logo(
+                        info.channel.id, info.channel.name
+                    ),
                 ),
                 stream_metadata_update_callback=self._update_live_metadata,
                 stream_metadata_update_interval=10,
@@ -844,7 +873,8 @@ class NhkRadioProvider(MusicProvider):
                 )
             },
         )
-        radio.metadata = self._build_metadata(program.title, thumbnail_url=None)
+        logo_url = _build_channel_logo(info.channel.id, info.channel.name)
+        radio.metadata = self._build_metadata(program.title, thumbnail_url=logo_url)
         return radio
 
     # --- Podcast Parsing Helpers ---

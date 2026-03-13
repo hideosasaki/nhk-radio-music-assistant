@@ -455,8 +455,10 @@ async def test_parse_radio_no_thumbnail(
     assert len(result) == 1
     radio = result[0]
     assert isinstance(radio, Radio)
-    # metadata.images should be None when no thumbnail
-    assert radio.metadata.images is None
+    # Even without a program thumbnail, channel logo should be used as fallback
+    assert radio.metadata.images is not None
+    assert len(radio.metadata.images) == 1
+    assert radio.metadata.images[0].path.startswith("data:image/svg+xml;base64,")
 
 
 # --- Config ---
