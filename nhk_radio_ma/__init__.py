@@ -8,6 +8,7 @@ from collections.abc import AsyncGenerator, Sequence
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
+import aiohttp
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from music_assistant_models.enums import (
     ContentType,
@@ -56,6 +57,8 @@ SUPPORTED_FEATURES = {
     ProviderFeature.LIBRARY_RADIOS_EDIT,
 }
 
+_HLS_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
 
 async def setup(mass: Any, manifest: Any, config: Any) -> NhkRadioProvider:
     """Set up the NHK Radio provider."""
@@ -63,10 +66,10 @@ async def setup(mass: Any, manifest: Any, config: Any) -> NhkRadioProvider:
 
 
 async def get_config_entries(
-    mass: Any,  # noqa: ARG001
-    instance_id: str | None = None,  # noqa: ARG001
-    action: str | None = None,  # noqa: ARG001
-    values: dict[str, Any] | None = None,  # noqa: ARG001
+    mass: Any,
+    instance_id: str | None = None,
+    action: str | None = None,
+    values: dict[str, Any] | None = None,
 ) -> tuple[ConfigEntry, ...]:
     """Get config entries for this provider."""
     from music_assistant_models.config_entries import (
@@ -117,6 +120,39 @@ class NhkRadioProvider(MusicProvider):
         self._live_watcher_task = None
         await self._client.get_channels()
         self.available = True
+
+    # --- ID parsing helpers ---
+
+    @staticmethod
+    def _parse_od_id(item_id: str) -> tuple[str, str, str]:
+        """Parse 'od:series/corner/episode' into components."""
+        rest = item_id.removeprefix("od:")
+        parts = rest.split("/")
+        return parts[0], parts[1], parts[2]
+
+    @staticmethod
+    def _parse_series_id(item_id: str) -> tuple[str, str]:
+        """Parse 'series:series_site_id/corner_site_id' into components."""
+        rest = item_id.removeprefix("series:")
+        return tuple(rest.split("/", 1))  # type: ignore[return-value]
+
+    # --- Metadata helpers ---
+
+    def _build_metadata(
+        self, description: str, thumbnail_url: str | None
+    ) -> MediaItemMetadata:
+        """Build MediaItemMetadata with optional thumbnail."""
+        images = None
+        if thumbnail_url:
+            images = UniqueList([
+                MediaItemImage(
+                    type=ImageType.THUMB,
+                    path=thumbnail_url,
+                    provider=DOMAIN,
+                    remotely_accessible=True,
+                )
+            ])
+        return MediaItemMetadata(description=description, images=images)
 
     # --- Browse ---
 
@@ -236,10 +272,16 @@ class NhkRadioProvider(MusicProvider):
         """Return series list as browse folders."""
         return [
             BrowseFolder(
-                item_id=f"{DOMAIN}://{path_prefix}/{self._series_key(s.series_site_id, s.corner_site_id)}",
+                item_id=(
+                    f"{DOMAIN}://{path_prefix}"
+                    f"/{self._series_key(s.series_site_id, s.corner_site_id)}"
+                ),
                 provider=DOMAIN,
                 name=s.title,
-                path=f"{DOMAIN}://{path_prefix}/{self._series_key(s.series_site_id, s.corner_site_id)}",
+                path=(
+                    f"{DOMAIN}://{path_prefix}"
+                    f"/{self._series_key(s.series_site_id, s.corner_site_id)}"
+                ),
                 image=MediaItemImage(
                     type=ImageType.THUMB,
                     path=s.thumbnail_url,
@@ -285,22 +327,33 @@ class NhkRadioProvider(MusicProvider):
 
     # --- Track (on-demand) ---
 
+    async def _find_episode(
+        self, series_site_id: str, corner_site_id: str, episode_key: str
+    ) -> tuple[OndemandProgram, int] | None:
+        """Find an episode by key, returning (episode, index) or None."""
+        episodes = await self._client.get_ondemand_programs(
+            series_site_id, corner_site_id
+        )
+        for i, ep in enumerate(episodes):
+            eid = ep.episode_id if ep.episode_id else str(i)
+            if eid == episode_key:
+                return ep, i
+        return None
+
     async def get_track(self, prov_track_id: str) -> Track:
         """Get a single on-demand track by ID."""
         if prov_track_id.startswith("od:"):
-            rest = prov_track_id.removeprefix("od:")
-            parts = rest.split("/")
-            series_site_id, corner_site_id = parts[0], parts[1]
-            episode_key = parts[2]
-            episodes = await self._client.get_ondemand_programs(
-                series_site_id, corner_site_id
+            series_site_id, corner_site_id, episode_key = self._parse_od_id(
+                prov_track_id
             )
-            for i, ep in enumerate(episodes):
-                eid = ep.episode_id if ep.episode_id else str(i)
-                if eid == episode_key:
-                    return self._parse_ondemand_track(
-                        ep, series_site_id, corner_site_id, i
-                    )
+            result = await self._find_episode(
+                series_site_id, corner_site_id, episode_key
+            )
+            if result is not None:
+                ep, i = result
+                return self._parse_ondemand_track(
+                    ep, series_site_id, corner_site_id, i
+                )
             msg = f"Episode not found: {prov_track_id}"
             raise ValueError(msg)
 
@@ -331,7 +384,7 @@ class NhkRadioProvider(MusicProvider):
             try:
                 radio = await self.get_radio(item_id)
                 yield radio
-            except Exception:
+            except (ValueError, KeyError):
                 self.logger.warning("Failed to load library item: %s", item_id)
 
     async def get_radio(self, prov_radio_id: str) -> Radio:
@@ -345,8 +398,7 @@ class NhkRadioProvider(MusicProvider):
             raise ValueError(msg)
 
         if prov_radio_id.startswith("series:"):
-            rest = prov_radio_id.removeprefix("series:")
-            series_site_id, corner_site_id = rest.split("/", 1)
+            series_site_id, corner_site_id = self._parse_series_id(prov_radio_id)
             episodes = await self._client.get_ondemand_programs(
                 series_site_id, corner_site_id
             )
@@ -462,8 +514,7 @@ class NhkRadioProvider(MusicProvider):
 
         # series: → play latest episode
         if item_id.startswith("series:"):
-            rest = item_id.removeprefix("series:")
-            series_site_id, corner_site_id = rest.split("/", 1)
+            series_site_id, corner_site_id = self._parse_series_id(item_id)
             episodes = await self._client.get_ondemand_programs(
                 series_site_id, corner_site_id
             )
@@ -475,17 +526,13 @@ class NhkRadioProvider(MusicProvider):
 
         # od: → play specific episode
         if item_id.startswith("od:"):
-            rest = item_id.removeprefix("od:")
-            parts = rest.split("/")
-            series_site_id, corner_site_id = parts[0], parts[1]
-            episode_key = parts[2]
-            episodes = await self._client.get_ondemand_programs(
-                series_site_id, corner_site_id
+            series_site_id, corner_site_id, episode_key = self._parse_od_id(item_id)
+            result = await self._find_episode(
+                series_site_id, corner_site_id, episode_key
             )
-            for i, ep in enumerate(episodes):
-                eid = ep.episode_id if ep.episode_id else str(i)
-                if eid == episode_key:
-                    return self._ondemand_stream_details(item_id, ep)
+            if result is not None:
+                ep, _i = result
+                return self._ondemand_stream_details(item_id, ep)
             msg = f"Episode not found: {item_id}"
             raise ValueError(msg)
 
@@ -516,19 +563,18 @@ class NhkRadioProvider(MusicProvider):
             ),
         )
 
-    async def get_audio_stream(
-        self, streamdetails: StreamDetails, seek_position: int = 0
-    ) -> AsyncGenerator[bytes, None]:
-        """Yield raw AAC bytes from NHK on-demand HLS stream.
+    # --- HLS stream handling ---
 
-        Downloads the HLS playlist, fetches the AES-128 key, then
-        downloads and decrypts each segment, yielding raw bytes.
+    async def _resolve_hls_segments(
+        self, master_url: str, session: aiohttp.ClientSession
+    ) -> tuple[bytes | None, bytes | None, list[tuple[float, str]]]:
+        """Resolve HLS playlists and return (key, iv, segments).
+
+        Fetches the master playlist, resolves the sub-playlist,
+        parses encryption info and segment URLs.
         """
-        master_url: str = streamdetails.data
-        session = self.mass.http_session
-
         # 1. Resolve master playlist → sub-playlist URL
-        async with session.get(master_url) as resp:
+        async with session.get(master_url, timeout=_HLS_TIMEOUT) as resp:
             resp.raise_for_status()
             master_text = await resp.text()
 
@@ -539,11 +585,11 @@ class NhkRadioProvider(MusicProvider):
                 sub_url = urljoin(master_url, line)
                 break
         if not sub_url:
-            self.logger.error("No sub-playlist found in master: %s", master_url)
-            return
+            msg = f"No sub-playlist found in master: {master_url}"
+            raise ValueError(msg)
 
         # 2. Fetch sub-playlist
-        async with session.get(sub_url) as resp:
+        async with session.get(sub_url, timeout=_HLS_TIMEOUT) as resp:
             resp.raise_for_status()
             playlist_text = await resp.text()
 
@@ -573,11 +619,42 @@ class NhkRadioProvider(MusicProvider):
         # 4. Fetch decryption key
         key: bytes | None = None
         if key_url:
-            async with session.get(key_url) as resp:
+            async with session.get(key_url, timeout=_HLS_TIMEOUT) as resp:
                 resp.raise_for_status()
                 key = await resp.read()
 
-        # 5. Skip segments before seek position
+        return key, iv, segments
+
+    @staticmethod
+    def _decrypt_segment(
+        data: bytes, key: bytes, iv: bytes | None, seq: int
+    ) -> bytes:
+        """Decrypt an AES-128-CBC encrypted HLS segment."""
+        seg_iv = iv if iv else seq.to_bytes(16, "big")
+        cipher = Cipher(algorithms.AES(key), modes.CBC(seg_iv))
+        decryptor = cipher.decryptor()
+        data = decryptor.update(data) + decryptor.finalize()
+        # Remove PKCS#7 padding
+        if data:
+            pad_len = data[-1]
+            if 0 < pad_len <= 16:
+                data = data[:-pad_len]
+        return data
+
+    async def get_audio_stream(
+        self, streamdetails: StreamDetails, seek_position: int = 0
+    ) -> AsyncGenerator[bytes, None]:
+        """Yield raw AAC bytes from NHK on-demand HLS stream.
+
+        Downloads the HLS playlist, fetches the AES-128 key, then
+        downloads and decrypts each segment, yielding raw bytes.
+        """
+        master_url: str = streamdetails.data
+        session = self.mass.http_session
+
+        key, iv, segments = await self._resolve_hls_segments(master_url, session)
+
+        # Skip segments before seek position
         start_index = 0
         if seek_position > 0:
             cumulative = 0.0
@@ -589,29 +666,20 @@ class NhkRadioProvider(MusicProvider):
             else:
                 start_index = len(segments)
 
-        # 6. Download, decrypt, and yield each segment
+        # Download, decrypt, and yield each segment
         for seq, (_dur, seg_url) in enumerate(
             segments[start_index:], start=start_index
         ):
             try:
-                async with session.get(seg_url) as resp:
+                async with session.get(seg_url, timeout=_HLS_TIMEOUT) as resp:
                     resp.raise_for_status()
                     data = await resp.read()
-            except Exception:
+            except aiohttp.ClientError:
                 self.logger.warning("Failed to download segment %d", seq)
                 continue
 
             if key:
-                # IV defaults to segment sequence number (big-endian 16 bytes)
-                seg_iv = iv if iv else seq.to_bytes(16, "big")
-                cipher = Cipher(algorithms.AES(key), modes.CBC(seg_iv))
-                decryptor = cipher.decryptor()
-                data = decryptor.update(data) + decryptor.finalize()
-                # Remove PKCS#7 padding
-                if data:
-                    pad_len = data[-1]
-                    if 0 < pad_len <= 16:
-                        data = data[:-pad_len]
+                data = self._decrypt_segment(data, key, iv, seq)
 
             yield data
 
@@ -632,20 +700,7 @@ class NhkRadioProvider(MusicProvider):
                 )
             },
         )
-        images: list[MediaItemImage] = []
-        if program.thumbnail_url:
-            images.append(
-                MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=program.thumbnail_url,
-                    provider=DOMAIN,
-                    remotely_accessible=True,
-                )
-            )
-        radio.metadata = MediaItemMetadata(
-            description=program.title,
-            images=UniqueList(images) if images else None,
-        )
+        radio.metadata = self._build_metadata(program.title, program.thumbnail_url)
         return radio
 
     def _parse_ondemand_track(
@@ -683,20 +738,7 @@ class NhkRadioProvider(MusicProvider):
                 ]
             ),
         )
-        images: list[MediaItemImage] = []
-        if ep.thumbnail_url:
-            images.append(
-                MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=ep.thumbnail_url,
-                    provider=DOMAIN,
-                    remotely_accessible=True,
-                )
-            )
-        track.metadata = MediaItemMetadata(
-            description=ep.description,
-            images=UniqueList(images) if images else None,
-        )
+        track.metadata = self._build_metadata(ep.description, ep.thumbnail_url)
         return track
 
     def _parse_series_radio_from_episode(
@@ -715,20 +757,7 @@ class NhkRadioProvider(MusicProvider):
                 )
             },
         )
-        images: list[MediaItemImage] = []
-        if ep.thumbnail_url:
-            images.append(
-                MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=ep.thumbnail_url,
-                    provider=DOMAIN,
-                    remotely_accessible=True,
-                )
-            )
-        radio.metadata = MediaItemMetadata(
-            description=ep.title,
-            images=UniqueList(images) if images else None,
-        )
+        radio.metadata = self._build_metadata(ep.title, ep.thumbnail_url)
         return radio
 
     def _parse_series_radio(self, series: OndemandSeries) -> Radio:
@@ -746,18 +775,5 @@ class NhkRadioProvider(MusicProvider):
                 )
             },
         )
-        images: list[MediaItemImage] = []
-        if series.thumbnail_url:
-            images.append(
-                MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=series.thumbnail_url,
-                    provider=DOMAIN,
-                    remotely_accessible=True,
-                )
-            )
-        radio.metadata = MediaItemMetadata(
-            description=series.description,
-            images=UniqueList(images) if images else None,
-        )
+        radio.metadata = self._build_metadata(series.description, series.thumbnail_url)
         return radio
