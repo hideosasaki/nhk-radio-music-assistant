@@ -33,3 +33,7 @@ class MusicProvider:
 
     def update_config_value(self, key: str, value: Any) -> None:
         pass
+
+    async def recommendations(self) -> list:
+        """Return recommendations (stub)."""
+        return []

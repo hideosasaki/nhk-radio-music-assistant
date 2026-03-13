@@ -14,6 +14,7 @@ from music_assistant_models.media_items import (
     PodcastEpisode,
     ProviderMapping,
     Radio,
+    RecommendationFolder,
 )
 
 from nhk_radio_ma import NhkRadioProvider
@@ -484,3 +485,53 @@ async def test_get_config_entries() -> None:
     assert isinstance(stored_podcasts_entry, ConfigEntry)
     assert stored_podcasts_entry.hidden is True
     assert stored_podcasts_entry.key == "stored_podcasts"
+
+
+# --- Recommendations ---
+
+
+async def test_recommendations_includes_live_channels(
+    provider: NhkRadioProvider,
+) -> None:
+    """Recommendations include live channels even without favorites."""
+    result = await provider.recommendations()
+    assert len(result) == 1
+    assert isinstance(result[0], RecommendationFolder)
+    assert result[0].name == "NHK Radio"
+    radios = [item for item in result[0].items if isinstance(item, Radio)]
+    assert len(radios) == 3
+    assert {r.item_id for r in radios} == {"live:r1", "live:r2", "live:fm"}
+
+
+async def test_recommendations_with_favorites(
+    provider: NhkRadioProvider,
+) -> None:
+    """Recommendations include favorite series latest episodes."""
+    podcast = _podcast("series:F684/01", "テストシリーズ")
+    await provider.library_add(podcast)
+
+    result = await provider.recommendations()
+    assert len(result) == 1
+    items = result[0].items
+    radios = [item for item in items if isinstance(item, Radio)]
+    episodes = [item for item in items if isinstance(item, PodcastEpisode)]
+    assert len(radios) == 3
+    assert len(episodes) == 1
+    assert episodes[0].item_id == "od:F684/01/ep001"
+    assert episodes[0].name == "テストシリーズ"  # uses series title, not episode title
+
+
+async def test_recommendations_favorite_error(
+    provider: NhkRadioProvider, mock_nhk_client: AsyncMock
+) -> None:
+    """Failed favorite lookups are skipped gracefully."""
+    podcast = _podcast("series:F684/01", "テストシリーズ")
+    await provider.library_add(podcast)
+
+    mock_nhk_client.get_ondemand_programs.side_effect = ValueError("not found")
+
+    result = await provider.recommendations()
+    assert len(result) == 1
+    # Only live channels, no episodes
+    episodes = [item for item in result[0].items if isinstance(item, PodcastEpisode)]
+    assert len(episodes) == 0

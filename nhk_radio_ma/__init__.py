@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import datetime
 from collections.abc import AsyncGenerator, Sequence
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
@@ -30,6 +31,7 @@ from music_assistant_models.media_items import (
     PodcastEpisode,
     ProviderMapping,
     Radio,
+    RecommendationFolder,
     SearchResults,
     UniqueList,
 )
@@ -63,6 +65,7 @@ if TYPE_CHECKING:
 SUPPORTED_FEATURES = {
     ProviderFeature.BROWSE,
     ProviderFeature.SEARCH,
+    ProviderFeature.RECOMMENDATIONS,
     ProviderFeature.LIBRARY_RADIOS,
     ProviderFeature.LIBRARY_RADIOS_EDIT,
     ProviderFeature.LIBRARY_PODCASTS,
@@ -334,6 +337,53 @@ class NhkRadioProvider(MusicProvider):
             for i, ep in enumerate(episodes)
         )
         return result
+
+    # --- Recommendations ---
+
+    async def recommendations(self) -> list[RecommendationFolder]:
+        """Return recommendations for the Home screen."""
+        items: UniqueList = UniqueList()
+
+        # Live channels
+        live_programs = await self._client.get_live_programs()
+        for info in live_programs.values():
+            items.append(self._parse_live_radio(info))
+
+        # Latest episode from each favorite series, sorted newest first
+        stored: list[str] = self.config.get_value(CONF_STORED_PODCASTS) or []
+        favorite_episodes: list[PodcastEpisode] = []
+        for item_id in stored:
+            try:
+                sid, cid = self._parse_series_id(item_id)
+                series, episodes = await self._client.get_ondemand_programs(
+                    sid, cid
+                )
+                if episodes:
+                    ep = self._parse_podcast_episode(
+                        episodes[0], sid, cid, 0, series
+                    )
+                    ep.name = series.title
+                    favorite_episodes.append(ep)
+            except (ValueError, KeyError):
+                self.logger.warning("Failed to load favorite: %s", item_id)
+        favorite_episodes.sort(
+            key=lambda e: e.metadata.release_date or datetime.min,
+            reverse=True,
+        )
+        for ep in favorite_episodes:
+            items.append(ep)
+
+        if not items:
+            return []
+
+        return [
+            RecommendationFolder(
+                item_id=f"{DOMAIN}://recommendations",
+                provider=DOMAIN,
+                name="NHK Radio",
+                items=items,
+            )
+        ]
 
     # --- Search ---
 
