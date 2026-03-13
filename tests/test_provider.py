@@ -358,7 +358,8 @@ async def test_stream_details_series(provider: NhkRadioProvider) -> None:
     assert details.stream_metadata is not None
     assert details.stream_metadata.title == "エピソード1"
     assert details.stream_metadata.album == "テストシリーズ"
-    assert details.stream_metadata.artist == "出演者"
+    assert details.stream_metadata.artist is not None
+    assert "放送" in details.stream_metadata.artist
     assert details.stream_metadata.description == "エピソード説明"
 
 

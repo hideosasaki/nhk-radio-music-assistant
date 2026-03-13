@@ -641,11 +641,21 @@ class NhkRadioProvider(MusicProvider):
             stream_metadata=StreamMetadata(
                 title=ep.title,
                 album=ep.series_name,
-                artist=ep.act or None,
+                artist=self._format_airdate(ep),
                 description=ep.description or series_description or None,
                 image_url=ep.thumbnail_url,
             ),
         )
+
+    @staticmethod
+    def _format_airdate(ep: OndemandEpisode) -> str | None:
+        """Format broadcast and expiry info for display."""
+        jst = ep.start_at.astimezone()
+        parts = [f"{jst.month}/{jst.day} {jst.hour}:{jst.minute:02d}放送"]
+        if ep.closed_at:
+            cjst = ep.closed_at.astimezone()
+            parts.append(f"{cjst.month}/{cjst.day} {cjst.hour}:{cjst.minute:02d}まで")
+        return " - ".join(parts) or None
 
     # --- HLS stream handling ---
 
