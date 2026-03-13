@@ -641,8 +641,8 @@ class NhkRadioProvider(MusicProvider):
             stream_metadata=StreamMetadata(
                 title=ep.title,
                 album=ep.series_name,
-                artist=ep.description,
-                description=series_description or None,
+                artist=ep.act or None,
+                description=ep.description or series_description or None,
                 image_url=ep.thumbnail_url,
             ),
         )
