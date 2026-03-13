@@ -4,6 +4,7 @@ DOMAIN = "nhk_radio_ma"
 
 CONF_AREA = "area"
 CONF_STORED_RADIOS = "stored_radios"
+CONF_STORED_PODCASTS = "stored_podcasts"
 
 AREAS: dict[str, str] = {
     "tokyo": "東京",

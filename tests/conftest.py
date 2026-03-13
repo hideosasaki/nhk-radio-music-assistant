@@ -14,12 +14,12 @@ from nhk_radio import (
     Genre,
     LiveInfo,
     LiveProgram,
-    OndemandProgram,
+    OndemandEpisode,
     OndemandSeries,
 )
 
 from nhk_radio_ma import NhkRadioProvider
-from nhk_radio_ma.const import CONF_AREA, CONF_STORED_RADIOS
+from nhk_radio_ma.const import CONF_AREA, CONF_STORED_PODCASTS, CONF_STORED_RADIOS
 
 
 # --- SDK model fixtures ---
@@ -82,15 +82,16 @@ def _make_ondemand_series(
         series_name=title,
         radio_broadcast="R1",
         corner_site_id=corner_site_id,
+        series_url="https://nhk.jp/series/F684",
     )
 
 
-def _make_ondemand_program(
+def _make_ondemand_episode(
     episode_id: str = "ep001",
     title: str = "テストエピソード",
     thumbnail_url: str | None = "https://nhk.jp/ep_thumb.jpg",
-) -> OndemandProgram:
-    return OndemandProgram(
+) -> OndemandEpisode:
+    return OndemandEpisode(
         title=title,
         description="エピソード説明",
         thumbnail_url=thumbnail_url,
@@ -129,8 +130,8 @@ def mock_nhk_client() -> AsyncMock:
     client.get_ondemand_programs.return_value = (
         _make_ondemand_series("F684", "01", "テストシリーズ"),
         [
-            _make_ondemand_program("ep001", "エピソード1"),
-            _make_ondemand_program("ep002", "エピソード2"),
+            _make_ondemand_episode("ep001", "エピソード1"),
+            _make_ondemand_episode("ep002", "エピソード2"),
         ],
     )
     client.search_ondemand.return_value = [
@@ -161,10 +162,12 @@ def mock_nhk_client() -> AsyncMock:
 def provider(mock_nhk_client: AsyncMock) -> NhkRadioProvider:
     """Create an NhkRadioProvider with a mocked client."""
     stored_radios: list[str] = []
+    stored_podcasts: list[str] = []
 
     config_values: dict[str, object] = {
         CONF_AREA: "nagoya",
         CONF_STORED_RADIOS: stored_radios,
+        CONF_STORED_PODCASTS: stored_podcasts,
     }
 
     config = SimpleNamespace(

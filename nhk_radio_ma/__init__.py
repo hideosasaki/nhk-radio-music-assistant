@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from music_assistant_models.enums import (
     ContentType,
     ImageType,
+    LinkType,
     MediaType,
     ProviderFeature,
     StreamType,
@@ -23,22 +24,31 @@ from music_assistant_models.media_items import (
     BrowseFolder,
     ItemMapping,
     MediaItemImage,
+    MediaItemLink,
     MediaItemMetadata,
+    Podcast,
+    PodcastEpisode,
     ProviderMapping,
     Radio,
     SearchResults,
-    Track,
     UniqueList,
 )
 from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 from nhk_radio import (
     LiveInfo,
     NhkRadioClient,
-    OndemandProgram,
+    OndemandEpisode,
     OndemandSeries,
 )
 
-from .const import AREAS, CONF_AREA, CONF_STORED_RADIOS, DOMAIN, KANA_MAP
+from .const import (
+    AREAS,
+    CONF_AREA,
+    CONF_STORED_PODCASTS,
+    CONF_STORED_RADIOS,
+    DOMAIN,
+    KANA_MAP,
+)
 
 try:
     from music_assistant.models.music_provider import (
@@ -55,6 +65,8 @@ SUPPORTED_FEATURES = {
     ProviderFeature.SEARCH,
     ProviderFeature.LIBRARY_RADIOS,
     ProviderFeature.LIBRARY_RADIOS_EDIT,
+    ProviderFeature.LIBRARY_PODCASTS,
+    ProviderFeature.LIBRARY_PODCASTS_EDIT,
 }
 
 _HLS_TIMEOUT = aiohttp.ClientTimeout(total=30)
@@ -96,6 +108,14 @@ async def get_config_entries(
             key=CONF_STORED_RADIOS,
             type=ConfigEntryType.STRING,
             label=CONF_STORED_RADIOS,
+            default_value=[],
+            hidden=True,
+            multi_value=True,
+        ),
+        ConfigEntry(
+            key=CONF_STORED_PODCASTS,
+            type=ConfigEntryType.STRING,
+            label=CONF_STORED_PODCASTS,
             default_value=[],
             hidden=True,
             multi_value=True,
@@ -156,7 +176,9 @@ class NhkRadioProvider(MusicProvider):
 
     # --- Browse ---
 
-    async def browse(self, path: str) -> Sequence[Radio | Track | BrowseFolder]:
+    async def browse(
+        self, path: str
+    ) -> Sequence[Radio | Podcast | PodcastEpisode | BrowseFolder]:
         """Browse NHK Radio content."""
         # Strip provider prefix if present
         if path.startswith(f"{DOMAIN}://"):
@@ -296,20 +318,21 @@ class NhkRadioProvider(MusicProvider):
 
     async def _browse_episodes(
         self, series_site_id: str, corner_site_id: str
-    ) -> list[Radio | Track]:
-        """Return series Radio, plus episode Tracks if multiple episodes."""
+    ) -> list[Podcast | PodcastEpisode]:
+        """Return series Podcast, plus PodcastEpisodes."""
         series, episodes = await self._client.get_ondemand_programs(
             series_site_id, corner_site_id
         )
         if not episodes:
             return []
-        series_radio = self._parse_series_radio(series)
-        result: list[Radio | Track] = [series_radio]
-        if len(episodes) > 1:
-            result.extend(
-                self._parse_ondemand_track(ep, series_site_id, corner_site_id, i)
-                for i, ep in enumerate(episodes)
+        podcast = self._parse_podcast(series)
+        result: list[Podcast | PodcastEpisode] = [podcast]
+        result.extend(
+            self._parse_podcast_episode(
+                ep, series_site_id, corner_site_id, i, series
             )
+            for i, ep in enumerate(episodes)
+        )
         return result
 
     # --- Search ---
@@ -321,49 +344,78 @@ class NhkRadioProvider(MusicProvider):
         limit: int = 5,
     ) -> SearchResults:
         """Search NHK Radio on-demand content."""
-        if MediaType.RADIO not in media_types:
+        if MediaType.PODCAST not in media_types:
             return SearchResults()
 
         series_list = await self._client.search_ondemand(search_query)
-        radios: list[Radio] = [
-            self._parse_series_radio(series)
+        podcasts: list[Podcast] = [
+            self._parse_podcast(series)
             for series in series_list[:limit]
         ]
-        return SearchResults(radio=radios)
+        return SearchResults(podcasts=podcasts)
 
-    # --- Track (on-demand) ---
+    # --- Podcast Episode (on-demand) ---
 
     async def _find_episode(
         self, series_site_id: str, corner_site_id: str, episode_key: str
-    ) -> tuple[OndemandProgram, int] | None:
-        """Find an episode by key, returning (episode, index) or None."""
-        _series, episodes = await self._client.get_ondemand_programs(
+    ) -> tuple[OndemandEpisode, int, OndemandSeries] | None:
+        """Find an episode by key, returning (episode, index, series) or None."""
+        series, episodes = await self._client.get_ondemand_programs(
             series_site_id, corner_site_id
         )
         for i, ep in enumerate(episodes):
             eid = ep.episode_id if ep.episode_id else str(i)
             if eid == episode_key:
-                return ep, i
+                return ep, i, series
         return None
 
-    async def get_track(self, prov_track_id: str) -> Track:
-        """Get a single on-demand track by ID."""
-        if prov_track_id.startswith("od:"):
+    async def get_podcast(self, prov_podcast_id: str) -> Podcast:
+        """Get a single podcast by ID."""
+        if prov_podcast_id.startswith("series:"):
+            series_site_id, corner_site_id = self._parse_series_id(
+                prov_podcast_id
+            )
+            series, _episodes = await self._client.get_ondemand_programs(
+                series_site_id, corner_site_id
+            )
+            return self._parse_podcast(series)
+
+        msg = f"Unknown podcast ID: {prov_podcast_id}"
+        raise ValueError(msg)
+
+    async def get_podcast_episodes(
+        self, prov_podcast_id: str
+    ) -> AsyncGenerator[PodcastEpisode, None]:
+        """Get all episodes for a podcast."""
+        series_site_id, corner_site_id = self._parse_series_id(prov_podcast_id)
+        series, episodes = await self._client.get_ondemand_programs(
+            series_site_id, corner_site_id
+        )
+        for i, ep in enumerate(episodes):
+            yield self._parse_podcast_episode(
+                ep, series_site_id, corner_site_id, i, series
+            )
+
+    async def get_podcast_episode(
+        self, prov_episode_id: str
+    ) -> PodcastEpisode:
+        """Get a single podcast episode by ID."""
+        if prov_episode_id.startswith("od:"):
             series_site_id, corner_site_id, episode_key = self._parse_od_id(
-                prov_track_id
+                prov_episode_id
             )
             result = await self._find_episode(
                 series_site_id, corner_site_id, episode_key
             )
             if result is not None:
-                ep, i = result
-                return self._parse_ondemand_track(
-                    ep, series_site_id, corner_site_id, i
+                ep, i, series = result
+                return self._parse_podcast_episode(
+                    ep, series_site_id, corner_site_id, i, series
                 )
-            msg = f"Episode not found: {prov_track_id}"
+            msg = f"Episode not found: {prov_episode_id}"
             raise ValueError(msg)
 
-        msg = f"Unknown track ID: {prov_track_id}"
+        msg = f"Unknown episode ID: {prov_episode_id}"
         raise ValueError(msg)
 
     async def get_artist(self, prov_artist_id: str) -> Artist:
@@ -384,9 +436,11 @@ class NhkRadioProvider(MusicProvider):
     # --- Library ---
 
     async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
-        """Yield saved radio items."""
+        """Yield saved live radio items."""
         stored: list[str] = self.config.get_value(CONF_STORED_RADIOS) or []
         for item_id in stored:
+            if not item_id.startswith("live:"):
+                continue
             try:
                 radio = await self.get_radio(item_id)
                 yield radio
@@ -403,21 +457,34 @@ class NhkRadioProvider(MusicProvider):
             msg = f"Channel not found: {channel_id}"
             raise ValueError(msg)
 
-        if prov_radio_id.startswith("series:"):
-            series_site_id, corner_site_id = self._parse_series_id(prov_radio_id)
-            series, _episodes = await self._client.get_ondemand_programs(
-                series_site_id, corner_site_id
-            )
-            return self._parse_series_radio(series)
-
         msg = f"Unknown radio ID: {prov_radio_id}"
         raise ValueError(msg)
 
-    async def library_add(self, item: Radio) -> bool:
+    async def get_library_podcasts(self) -> AsyncGenerator[Podcast, None]:
+        """Yield saved podcast items."""
+        stored: list[str] = self.config.get_value(CONF_STORED_PODCASTS) or []
+        for item_id in stored:
+            try:
+                podcast = await self.get_podcast(item_id)
+                yield podcast
+            except (ValueError, KeyError):
+                self.logger.warning(
+                    "Failed to load library podcast: %s", item_id
+                )
+
+    async def library_add(self, item: Radio | Podcast) -> bool:
         """Add item to library."""
-        stored: list[str] = list(
-            self.config.get_value(CONF_STORED_RADIOS) or []
-        )
+        if isinstance(item, Podcast):
+            stored: list[str] = list(
+                self.config.get_value(CONF_STORED_PODCASTS) or []
+            )
+            if item.item_id in stored:
+                return False
+            stored.append(item.item_id)
+            self.update_config_value(CONF_STORED_PODCASTS, stored)
+            return True
+
+        stored = list(self.config.get_value(CONF_STORED_RADIOS) or [])
         item_id = item.item_id
         if item_id in stored:
             return False
@@ -429,9 +496,17 @@ class NhkRadioProvider(MusicProvider):
         self, prov_item_id: str, media_type: MediaType
     ) -> bool:
         """Remove item from library."""
-        stored: list[str] = list(
-            self.config.get_value(CONF_STORED_RADIOS) or []
-        )
+        if media_type == MediaType.PODCAST:
+            stored: list[str] = list(
+                self.config.get_value(CONF_STORED_PODCASTS) or []
+            )
+            if prov_item_id not in stored:
+                return False
+            stored.remove(prov_item_id)
+            self.update_config_value(CONF_STORED_PODCASTS, stored)
+            return True
+
+        stored = list(self.config.get_value(CONF_STORED_RADIOS) or [])
         if prov_item_id not in stored:
             return False
         stored.remove(prov_item_id)
@@ -535,7 +610,7 @@ class NhkRadioProvider(MusicProvider):
                 series_site_id, corner_site_id, episode_key
             )
             if result is not None:
-                ep, _i = result
+                ep, _i, _series = result
                 return self._ondemand_stream_details(item_id, ep)
             msg = f"Episode not found: {item_id}"
             raise ValueError(msg)
@@ -548,7 +623,7 @@ class NhkRadioProvider(MusicProvider):
     def _ondemand_stream_details(
         self,
         item_id: str,
-        ep: OndemandProgram,
+        ep: OndemandEpisode,
         series_description: str = "",
     ) -> StreamDetails:
         """Build StreamDetails for an on-demand episode."""
@@ -557,7 +632,7 @@ class NhkRadioProvider(MusicProvider):
             provider=DOMAIN,
             item_id=item_id,
             audio_format=AudioFormat(content_type=ContentType.AAC),
-            media_type=MediaType.TRACK,
+            media_type=MediaType.PODCAST_EPISODE,
             stream_type=StreamType.CUSTOM,
             duration=duration if duration > 0 else None,
             data=ep.stream_url,
@@ -712,51 +787,58 @@ class NhkRadioProvider(MusicProvider):
         radio.metadata = self._build_metadata(program.title, thumbnail_url=None)
         return radio
 
-    def _parse_ondemand_track(
+    # --- Podcast Parsing Helpers ---
+
+    def _parse_podcast(self, series: OndemandSeries) -> Podcast:
+        """Convert OndemandSeries to a Podcast item."""
+        item_id = f"series:{series.series_site_id}/{series.corner_site_id}"
+        podcast = Podcast(
+            item_id=item_id,
+            provider=DOMAIN,
+            name=series.title,
+            publisher=f"NHK {series.radio_broadcast}",
+            provider_mappings={
+                ProviderMapping(
+                    item_id=item_id,
+                    provider_domain=DOMAIN,
+                    provider_instance=self.instance_id,
+                )
+            },
+        )
+        podcast.metadata = self._build_metadata(
+            series.description, series.thumbnail_url
+        )
+        if series.series_url:
+            podcast.metadata.links = {
+                MediaItemLink(type=LinkType.WEBSITE, url=series.series_url)
+            }
+        return podcast
+
+    def _parse_podcast_episode(
         self,
-        ep: OndemandProgram,
+        ep: OndemandEpisode,
         series_site_id: str,
         corner_site_id: str,
         index: int,
-    ) -> Track:
-        """Convert OndemandProgram to a Track item."""
+        series: OndemandSeries,
+    ) -> PodcastEpisode:
+        """Convert OndemandEpisode to a PodcastEpisode item."""
         episode_key = ep.episode_id if ep.episode_id else str(index)
         item_id = f"od:{series_site_id}/{corner_site_id}/{episode_key}"
         duration = int((ep.end_at - ep.start_at).total_seconds())
-        subtitle = ep.description or ep.series_name
-        track = Track(
+        podcast_item_id = f"series:{series_site_id}/{corner_site_id}"
+        episode = PodcastEpisode(
             item_id=item_id,
             provider=DOMAIN,
             name=ep.title,
             duration=max(duration, 0),
-            provider_mappings={
-                ProviderMapping(
-                    item_id=item_id,
-                    provider_domain=DOMAIN,
-                    provider_instance=self.instance_id,
-                )
-            },
-            artists=UniqueList(
-                [
-                    ItemMapping(
-                        media_type=MediaType.ARTIST,
-                        item_id=subtitle,
-                        provider=DOMAIN,
-                        name=subtitle,
-                    )
-                ]
+            position=index,
+            podcast=ItemMapping(
+                media_type=MediaType.PODCAST,
+                item_id=podcast_item_id,
+                provider=DOMAIN,
+                name=series.title,
             ),
-        )
-        track.metadata = self._build_metadata(ep.description, ep.thumbnail_url)
-        return track
-
-    def _parse_series_radio(self, series: OndemandSeries) -> Radio:
-        """Convert OndemandSeries to a Radio item."""
-        item_id = f"series:{series.series_site_id}/{series.corner_site_id}"
-        radio = Radio(
-            item_id=item_id,
-            provider=DOMAIN,
-            name=series.title,
             provider_mappings={
                 ProviderMapping(
                     item_id=item_id,
@@ -765,6 +847,8 @@ class NhkRadioProvider(MusicProvider):
                 )
             },
         )
-        radio.metadata = self._build_metadata(series.description, series.thumbnail_url)
-        radio.metadata.label = "番組"
-        return radio
+        episode.metadata = self._build_metadata(ep.description, ep.thumbnail_url)
+        if ep.act:
+            episode.metadata.performers = {ep.act}
+        episode.metadata.release_date = ep.start_at
+        return episode

@@ -7,16 +7,38 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from music_assistant_models.enums import ContentType, MediaType, StreamType
-from music_assistant_models.media_items import BrowseFolder, ProviderMapping, Radio, Track
+from music_assistant_models.enums import ContentType, LinkType, MediaType, StreamType
+from music_assistant_models.media_items import (
+    BrowseFolder,
+    Podcast,
+    PodcastEpisode,
+    ProviderMapping,
+    Radio,
+)
 
 from nhk_radio_ma import NhkRadioProvider
-from nhk_radio_ma.const import CONF_STORED_RADIOS, DOMAIN
+from nhk_radio_ma.const import CONF_STORED_PODCASTS, CONF_STORED_RADIOS, DOMAIN
 
 
 def _radio(item_id: str, name: str) -> Radio:
     """Helper to create a Radio with required fields."""
     return Radio(
+        item_id=item_id,
+        provider=DOMAIN,
+        name=name,
+        provider_mappings={
+            ProviderMapping(
+                item_id=item_id,
+                provider_domain=DOMAIN,
+                provider_instance=DOMAIN,
+            )
+        },
+    )
+
+
+def _podcast(item_id: str, name: str) -> Podcast:
+    """Helper to create a Podcast with required fields."""
+    return Podcast(
         item_id=item_id,
         provider=DOMAIN,
         name=name,
@@ -62,28 +84,39 @@ async def test_browse_new_series_list(provider: NhkRadioProvider) -> None:
 
 
 async def test_browse_series_multiple_episodes(provider: NhkRadioProvider) -> None:
-    """Multiple episodes: series Radio followed by episode Tracks."""
+    """Multiple episodes: series Podcast followed by PodcastEpisodes."""
     result = await provider.browse(f"{DOMAIN}://new/F684_01")
     assert len(result) == 3
-    # First item is the series Radio
-    assert isinstance(result[0], Radio)
+    # First item is the series Podcast
+    assert isinstance(result[0], Podcast)
     assert result[0].item_id == "series:F684/01"
     assert result[0].metadata.description == "シリーズ説明"
-    # Remaining items are episode Tracks
-    assert all(isinstance(r, Track) for r in result[1:])
+    assert result[0].publisher == "NHK R1"
+    assert result[0].metadata.links is not None
+    link = next(iter(result[0].metadata.links))
+    assert link.type == LinkType.WEBSITE
+    assert link.url == "https://nhk.jp/series/F684"
+    # Remaining items are PodcastEpisodes
+    assert all(isinstance(r, PodcastEpisode) for r in result[1:])
     assert result[1].item_id == "od:F684/01/ep001"
     assert result[2].item_id == "od:F684/01/ep002"
     assert result[1].duration == 1800  # 30 minutes
+    assert result[1].podcast.item_id == "series:F684/01"
+    assert result[1].podcast.name == "テストシリーズ"
+    assert result[1].metadata.performers == {"出演者"}
+    assert result[1].metadata.release_date is not None
 
 
 async def test_browse_series_single_episode(provider: NhkRadioProvider) -> None:
-    """Single episode: only series Radio, no episode Track."""
+    """Single episode: Podcast plus one PodcastEpisode."""
     series, episodes = provider._client.get_ondemand_programs.return_value
     provider._client.get_ondemand_programs.return_value = (series, episodes[:1])
     result = await provider.browse(f"{DOMAIN}://new/F684_01")
-    assert len(result) == 1
-    assert isinstance(result[0], Radio)
+    assert len(result) == 2
+    assert isinstance(result[0], Podcast)
     assert result[0].item_id == "series:F684/01"
+    assert isinstance(result[1], PodcastEpisode)
+    assert result[1].item_id == "od:F684/01/ep001"
 
 
 async def test_browse_genre_list(provider: NhkRadioProvider) -> None:
@@ -107,35 +140,61 @@ async def test_browse_kana_list(provider: NhkRadioProvider) -> None:
 
 
 async def test_search(provider: NhkRadioProvider) -> None:
-    """Search returns Radio items from on-demand results."""
-    results = await provider.search("テスト", [MediaType.RADIO], limit=5)
-    assert len(results.radio) == 1
-    assert results.radio[0].item_id == "series:F684/01"
+    """Search returns Podcast items from on-demand results."""
+    results = await provider.search("テスト", [MediaType.PODCAST], limit=5)
+    assert len(results.podcasts) == 1
+    assert results.podcasts[0].item_id == "series:F684/01"
 
 
 async def test_search_wrong_media_type(provider: NhkRadioProvider) -> None:
-    """Search with non-RADIO type returns empty."""
+    """Search with non-PODCAST type returns empty."""
     results = await provider.search("テスト", [MediaType.TRACK], limit=5)
-    assert len(results.radio) == 0
+    assert len(results.podcasts) == 0
 
 
-# --- Track (on-demand) ---
+# --- Podcast Episode (on-demand) ---
 
 
-async def test_get_track(provider: NhkRadioProvider) -> None:
-    """get_track returns a Track for an on-demand episode."""
-    track = await provider.get_track("od:F684/01/ep001")
-    assert isinstance(track, Track)
-    assert track.item_id == "od:F684/01/ep001"
-    assert track.duration == 1800
-    assert len(track.artists) == 1
-    assert track.artists[0].name == "エピソード説明"
+async def test_get_podcast_episode(provider: NhkRadioProvider) -> None:
+    """get_podcast_episode returns a PodcastEpisode for an on-demand episode."""
+    episode = await provider.get_podcast_episode("od:F684/01/ep001")
+    assert isinstance(episode, PodcastEpisode)
+    assert episode.item_id == "od:F684/01/ep001"
+    assert episode.duration == 1800
+    assert episode.podcast.item_id == "series:F684/01"
+    assert episode.podcast.name == "テストシリーズ"
 
 
-async def test_get_track_unknown(provider: NhkRadioProvider) -> None:
-    """get_track raises ValueError for unknown ID."""
-    with pytest.raises(ValueError, match="Unknown track"):
-        await provider.get_track("live:r1")
+async def test_get_podcast_episode_unknown(provider: NhkRadioProvider) -> None:
+    """get_podcast_episode raises ValueError for unknown ID."""
+    with pytest.raises(ValueError, match="Unknown episode"):
+        await provider.get_podcast_episode("live:r1")
+
+
+# --- Podcast ---
+
+
+async def test_get_podcast(provider: NhkRadioProvider) -> None:
+    """get_podcast returns a Podcast for a series."""
+    podcast = await provider.get_podcast("series:F684/01")
+    assert isinstance(podcast, Podcast)
+    assert podcast.item_id == "series:F684/01"
+    assert podcast.name == "テストシリーズ"
+
+
+async def test_get_podcast_unknown(provider: NhkRadioProvider) -> None:
+    """get_podcast raises ValueError for unknown ID."""
+    with pytest.raises(ValueError, match="Unknown podcast"):
+        await provider.get_podcast("live:r1")
+
+
+async def test_get_podcast_episodes(provider: NhkRadioProvider) -> None:
+    """get_podcast_episodes yields PodcastEpisode items."""
+    episodes = [ep async for ep in provider.get_podcast_episodes("series:F684/01")]
+    assert len(episodes) == 2
+    assert all(isinstance(ep, PodcastEpisode) for ep in episodes)
+    assert episodes[0].item_id == "od:F684/01/ep001"
+    assert episodes[1].item_id == "od:F684/01/ep002"
 
 
 # --- Stream Details ---
@@ -284,7 +343,7 @@ async def test_stream_details_ondemand(provider: NhkRadioProvider) -> None:
     """On-demand stream returns CUSTOM with URL in data and seek enabled."""
     details = await provider.get_stream_details("od:F684/01/ep001")
     assert details.stream_type == StreamType.CUSTOM
-    assert details.media_type == MediaType.TRACK
+    assert details.media_type == MediaType.PODCAST_EPISODE
     assert "ondemand" in details.data
     assert details.stream_metadata is not None
     assert details.can_seek is True
@@ -312,8 +371,8 @@ async def test_stream_details_unknown(provider: NhkRadioProvider) -> None:
 # --- Library ---
 
 
-async def test_library_add_remove(provider: NhkRadioProvider) -> None:
-    """Add and remove items from library."""
+async def test_library_add_remove_radio(provider: NhkRadioProvider) -> None:
+    """Add and remove live radio items from library."""
     radio = _radio("live:r1", "R1")
 
     added = await provider.library_add(radio)
@@ -330,16 +389,41 @@ async def test_library_add_remove(provider: NhkRadioProvider) -> None:
     assert removed_again is False
 
 
+async def test_library_add_remove_podcast(provider: NhkRadioProvider) -> None:
+    """Add and remove podcast items from library."""
+    podcast = _podcast("series:F684/01", "テストシリーズ")
+
+    added = await provider.library_add(podcast)
+    assert added is True
+
+    added_again = await provider.library_add(podcast)
+    assert added_again is False
+
+    removed = await provider.library_remove("series:F684/01", MediaType.PODCAST)
+    assert removed is True
+
+    removed_again = await provider.library_remove("series:F684/01", MediaType.PODCAST)
+    assert removed_again is False
+
+
 async def test_library_get_radios(provider: NhkRadioProvider) -> None:
-    """Get library radios returns saved items."""
-    # Add a series and a live channel
+    """Get library radios returns only live items."""
     radio_live = _radio("live:r1", "R1")
-    radio_series = _radio("series:F684/01", "Series")
     await provider.library_add(radio_live)
-    await provider.library_add(radio_series)
 
     radios = [r async for r in provider.get_library_radios()]
-    assert len(radios) == 2
+    assert len(radios) == 1
+    assert radios[0].item_id == "live:r1"
+
+
+async def test_library_get_podcasts(provider: NhkRadioProvider) -> None:
+    """Get library podcasts returns saved podcast items."""
+    podcast = _podcast("series:F684/01", "テストシリーズ")
+    await provider.library_add(podcast)
+
+    podcasts = [p async for p in provider.get_library_podcasts()]
+    assert len(podcasts) == 1
+    assert podcasts[0].item_id == "series:F684/01"
 
 
 # --- Radio Parsing ---
@@ -350,11 +434,11 @@ async def test_parse_radio_no_thumbnail(
 ) -> None:
     """Radio parsing works even without thumbnail."""
     from tests.conftest import _make_live_info, _make_live_program
+    from nhk_radio import LiveInfo
 
     # Override with no-thumbnail live info
     info = _make_live_info()
     no_thumb_program = _make_live_program(thumbnail_url=None)
-    from nhk_radio import LiveInfo
 
     info_no_thumb = LiveInfo(
         channel=info.channel,
@@ -382,7 +466,7 @@ async def test_get_config_entries() -> None:
     from music_assistant_models.config_entries import ConfigEntry, ConfigEntryType
 
     entries = await get_config_entries(mass=None)
-    assert len(entries) == 2
+    assert len(entries) == 3
 
     area_entry = entries[0]
     assert isinstance(area_entry, ConfigEntry)
@@ -391,6 +475,11 @@ async def test_get_config_entries() -> None:
     assert area_entry.default_value == "tokyo"
     assert len(area_entry.options) == 8
 
-    stored_entry = entries[1]
-    assert isinstance(stored_entry, ConfigEntry)
-    assert stored_entry.hidden is True
+    stored_radios_entry = entries[1]
+    assert isinstance(stored_radios_entry, ConfigEntry)
+    assert stored_radios_entry.hidden is True
+
+    stored_podcasts_entry = entries[2]
+    assert isinstance(stored_podcasts_entry, ConfigEntry)
+    assert stored_podcasts_entry.hidden is True
+    assert stored_podcasts_entry.key == "stored_podcasts"
