@@ -144,6 +144,13 @@ def mock_nhk_client() -> AsyncMock:
         _make_ondemand_series("F687", "01", "あいうえお番組"),
     ]
 
+    # on_live_program_change: default to an empty async generator
+    async def _empty_generator():
+        return
+        yield  # noqa: RET504 - makes this an async generator
+
+    client.on_live_program_change = _empty_generator
+
     return client
 
 
@@ -166,6 +173,8 @@ def provider(mock_nhk_client: AsyncMock) -> NhkRadioProvider:
 
     p = NhkRadioProvider(mass, manifest, config, set())
     p._client = mock_nhk_client
+    p._live_cache = {}
+    p._live_watcher_task = None
 
     # Track config updates
     def _update_config(key: str, value: object) -> None:

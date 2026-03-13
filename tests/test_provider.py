@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -134,8 +135,129 @@ async def test_stream_details_live(provider: NhkRadioProvider) -> None:
     assert "r1" in details.path
     assert details.stream_metadata is not None
     assert details.stream_metadata.title == "テスト番組"
+    assert details.stream_metadata.image_url == "https://nhk.jp/thumb.jpg"
     assert details.can_seek is False
     assert details.allow_seek is False
+    assert details.stream_metadata_update_callback is not None
+    assert details.stream_metadata_update_interval == 10
+
+
+async def test_live_metadata_update_on_program_change(
+    provider: NhkRadioProvider,
+) -> None:
+    """Metadata callback updates title and image from live cache."""
+    from tests.conftest import _make_live_info, _make_live_program
+    from nhk_radio import LiveInfo
+
+    # Start with initial program
+    details = await provider.get_stream_details("live:r1")
+    assert details.stream_metadata.title == "テスト番組"
+    assert details.stream_metadata.image_url == "https://nhk.jp/thumb.jpg"
+
+    # Simulate on_live_program_change updating the cache
+    new_program = _make_live_program(
+        series_name="次の番組",
+        title="次のタイトル",
+        channel_id="r1",
+        thumbnail_url="https://nhk.jp/next_thumb.jpg",
+    )
+    new_info = LiveInfo(
+        channel=_make_live_info("r1").channel,
+        area=_make_live_info("r1").area,
+        previous=None,
+        present=new_program,
+        following=None,
+    )
+    provider._live_cache["r1"] = new_info
+
+    # Call the metadata update callback (simulates what MA server does periodically)
+    await details.stream_metadata_update_callback(details, 10)
+
+    # Verify metadata is updated from cache
+    assert details.stream_metadata.title == "次の番組"
+    assert details.stream_metadata.description == "次のタイトル"
+    assert details.stream_metadata.image_url == "https://nhk.jp/next_thumb.jpg"
+
+
+async def test_live_metadata_update_cache_miss(
+    provider: NhkRadioProvider,
+) -> None:
+    """Metadata callback does nothing when channel not in cache."""
+    details = await provider.get_stream_details("live:r1")
+    original_title = details.stream_metadata.title
+
+    # Clear cache to simulate cache miss
+    provider._live_cache.clear()
+
+    # Should not raise, metadata stays unchanged
+    await details.stream_metadata_update_callback(details, 10)
+    assert details.stream_metadata.title == original_title
+
+
+async def test_live_watcher_starts_on_playback(
+    provider: NhkRadioProvider, mock_nhk_client: AsyncMock
+) -> None:
+    """get_stream_details starts live watcher background task."""
+    # Before playback, no watcher
+    assert provider._live_watcher_task is None
+
+    await provider.get_stream_details("live:r1")
+
+    # Watcher should be started
+    assert provider._live_watcher_task is not None
+    assert not provider._live_watcher_task.done()
+
+    # Clean up
+    provider._live_watcher_task.cancel()
+
+
+async def test_live_watcher_populates_cache(
+    provider: NhkRadioProvider, mock_nhk_client: AsyncMock
+) -> None:
+    """Live watcher updates cache when on_live_program_change yields."""
+    from tests.conftest import _make_live_info
+
+    # Set up mock async generator for on_live_program_change
+    new_info = _make_live_info("r1", "R1")
+
+    async def mock_generator():
+        yield new_info
+
+    mock_nhk_client.on_live_program_change = mock_generator
+
+    # Run watcher (it will consume the generator and stop)
+    await provider._watch_live_programs()
+
+    assert "r1" in provider._live_cache
+    assert provider._live_cache["r1"] is new_info
+
+
+async def test_get_stream_details_seeds_cache(
+    provider: NhkRadioProvider,
+) -> None:
+    """get_stream_details seeds the live cache with initial data."""
+    assert "r1" not in provider._live_cache
+
+    await provider.get_stream_details("live:r1")
+
+    assert "r1" in provider._live_cache
+
+
+async def test_unload_cancels_watcher(
+    provider: NhkRadioProvider, mock_nhk_client: AsyncMock
+) -> None:
+    """unload cancels the live watcher task."""
+    await provider.get_stream_details("live:r1")
+    task = provider._live_watcher_task
+    assert task is not None
+
+    await provider.unload()
+    # Allow cancellation to propagate
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert task.cancelled()
 
 
 async def test_stream_details_ondemand(provider: NhkRadioProvider) -> None:

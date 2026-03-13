@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import AsyncGenerator, Sequence
 from typing import TYPE_CHECKING, Any
@@ -103,6 +104,8 @@ class NhkRadioProvider(MusicProvider):
     """NHK Radio Music Provider."""
 
     _client: NhkRadioClient
+    _live_cache: dict[str, LiveInfo]
+    _live_watcher_task: asyncio.Task | None
 
     async def handle_async_init(self) -> None:
         """Initialize the provider."""
@@ -110,6 +113,8 @@ class NhkRadioProvider(MusicProvider):
             self.mass.http_session,
             area=self.config.get_value(CONF_AREA),
         )
+        self._live_cache = {}
+        self._live_watcher_task = None
         await self._client.get_channels()
         self.available = True
 
@@ -383,6 +388,44 @@ class NhkRadioProvider(MusicProvider):
 
     # --- Stream ---
 
+    # --- Live watcher ---
+
+    def _start_live_watcher(self) -> None:
+        """Start background task to watch for live program changes."""
+        if self._live_watcher_task and not self._live_watcher_task.done():
+            return
+        self._live_watcher_task = asyncio.create_task(self._watch_live_programs())
+
+    async def _watch_live_programs(self) -> None:
+        """Watch for live program changes and update cache."""
+        try:
+            async for info in self._client.on_live_program_change():
+                self._live_cache[info.channel.id] = info
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.warning("Live watcher stopped", exc_info=True)
+
+    async def _update_live_metadata(
+        self, streamdetails: StreamDetails, elapsed_time: int
+    ) -> None:
+        """Update live stream metadata from cache."""
+        channel_id = streamdetails.item_id.removeprefix("live:")
+        info = self._live_cache.get(channel_id)
+        if info is None:
+            return
+        program = info.present
+        streamdetails.stream_metadata = StreamMetadata(
+            title=program.series_name,
+            description=program.title,
+            image_url=program.thumbnail_url,
+        )
+
+    async def unload(self) -> None:
+        """Clean up on provider unload."""
+        if self._live_watcher_task and not self._live_watcher_task.done():
+            self._live_watcher_task.cancel()
+
     # NHK on-demand uses AES-128 encrypted HE-AAC HLS at 48kbps.
     # ffmpeg's HLS demuxer produces intermittent decode errors causing audible
     # glitches.  We use StreamType.CUSTOM to download and decrypt HLS segments
@@ -397,6 +440,8 @@ class NhkRadioProvider(MusicProvider):
             channel_id = item_id.removeprefix("live:")
             live_programs = await self._client.get_live_programs()
             info = live_programs[channel_id]
+            self._live_cache[channel_id] = info
+            self._start_live_watcher()
             return StreamDetails(
                 provider=DOMAIN,
                 item_id=item_id,
@@ -411,6 +456,8 @@ class NhkRadioProvider(MusicProvider):
                     description=info.present.title,
                     image_url=info.present.thumbnail_url,
                 ),
+                stream_metadata_update_callback=self._update_live_metadata,
+                stream_metadata_update_interval=10,
             )
 
         # series: → play latest episode
@@ -585,8 +632,19 @@ class NhkRadioProvider(MusicProvider):
                 )
             },
         )
+        images: list[MediaItemImage] = []
+        if program.thumbnail_url:
+            images.append(
+                MediaItemImage(
+                    type=ImageType.THUMB,
+                    path=program.thumbnail_url,
+                    provider=DOMAIN,
+                    remotely_accessible=True,
+                )
+            )
         radio.metadata = MediaItemMetadata(
             description=program.title,
+            images=UniqueList(images) if images else None,
         )
         return radio
 
