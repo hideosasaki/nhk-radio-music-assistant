@@ -61,14 +61,29 @@ async def test_browse_new_series_list(provider: NhkRadioProvider) -> None:
     assert result[1].path == f"{DOMAIN}://new/F685_02"
 
 
-async def test_browse_series_episodes(provider: NhkRadioProvider) -> None:
-    """Series path returns episodes as Track items."""
+async def test_browse_series_multiple_episodes(provider: NhkRadioProvider) -> None:
+    """Multiple episodes: series Radio followed by episode Tracks."""
     result = await provider.browse(f"{DOMAIN}://new/F684_01")
-    assert len(result) == 2
-    assert all(isinstance(r, Track) for r in result)
-    assert result[0].item_id == "od:F684/01/ep001"
-    assert result[1].item_id == "od:F684/01/ep002"
-    assert result[0].duration == 1800  # 30 minutes
+    assert len(result) == 3
+    # First item is the series Radio
+    assert isinstance(result[0], Radio)
+    assert result[0].item_id == "series:F684/01"
+    assert result[0].metadata.description == "シリーズ説明"
+    # Remaining items are episode Tracks
+    assert all(isinstance(r, Track) for r in result[1:])
+    assert result[1].item_id == "od:F684/01/ep001"
+    assert result[2].item_id == "od:F684/01/ep002"
+    assert result[1].duration == 1800  # 30 minutes
+
+
+async def test_browse_series_single_episode(provider: NhkRadioProvider) -> None:
+    """Single episode: only series Radio, no episode Track."""
+    series, episodes = provider._client.get_ondemand_programs.return_value
+    provider._client.get_ondemand_programs.return_value = (series, episodes[:1])
+    result = await provider.browse(f"{DOMAIN}://new/F684_01")
+    assert len(result) == 1
+    assert isinstance(result[0], Radio)
+    assert result[0].item_id == "series:F684/01"
 
 
 async def test_browse_genre_list(provider: NhkRadioProvider) -> None:
@@ -114,7 +129,7 @@ async def test_get_track(provider: NhkRadioProvider) -> None:
     assert track.item_id == "od:F684/01/ep001"
     assert track.duration == 1800
     assert len(track.artists) == 1
-    assert track.artists[0].name == "出演者"
+    assert track.artists[0].name == "エピソード説明"
 
 
 async def test_get_track_unknown(provider: NhkRadioProvider) -> None:

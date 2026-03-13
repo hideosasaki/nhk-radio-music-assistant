@@ -296,15 +296,21 @@ class NhkRadioProvider(MusicProvider):
 
     async def _browse_episodes(
         self, series_site_id: str, corner_site_id: str
-    ) -> list[Track]:
-        """Return episodes as Track items."""
-        episodes = await self._client.get_ondemand_programs(
+    ) -> list[Radio | Track]:
+        """Return series Radio, plus episode Tracks if multiple episodes."""
+        series, episodes = await self._client.get_ondemand_programs(
             series_site_id, corner_site_id
         )
-        return [
-            self._parse_ondemand_track(ep, series_site_id, corner_site_id, i)
-            for i, ep in enumerate(episodes)
-        ]
+        if not episodes:
+            return []
+        series_radio = self._parse_series_radio(series)
+        result: list[Radio | Track] = [series_radio]
+        if len(episodes) > 1:
+            result.extend(
+                self._parse_ondemand_track(ep, series_site_id, corner_site_id, i)
+                for i, ep in enumerate(episodes)
+            )
+        return result
 
     # --- Search ---
 
@@ -331,7 +337,7 @@ class NhkRadioProvider(MusicProvider):
         self, series_site_id: str, corner_site_id: str, episode_key: str
     ) -> tuple[OndemandProgram, int] | None:
         """Find an episode by key, returning (episode, index) or None."""
-        episodes = await self._client.get_ondemand_programs(
+        _series, episodes = await self._client.get_ondemand_programs(
             series_site_id, corner_site_id
         )
         for i, ep in enumerate(episodes):
@@ -399,16 +405,10 @@ class NhkRadioProvider(MusicProvider):
 
         if prov_radio_id.startswith("series:"):
             series_site_id, corner_site_id = self._parse_series_id(prov_radio_id)
-            episodes = await self._client.get_ondemand_programs(
+            series, _episodes = await self._client.get_ondemand_programs(
                 series_site_id, corner_site_id
             )
-            if episodes:
-                radio = self._parse_series_radio_from_episode(
-                    episodes[0], prov_radio_id
-                )
-                return radio
-            msg = f"No episodes for series: {prov_radio_id}"
-            raise ValueError(msg)
+            return self._parse_series_radio(series)
 
         msg = f"Unknown radio ID: {prov_radio_id}"
         raise ValueError(msg)
@@ -515,7 +515,7 @@ class NhkRadioProvider(MusicProvider):
         # series: → play latest episode
         if item_id.startswith("series:"):
             series_site_id, corner_site_id = self._parse_series_id(item_id)
-            episodes = await self._client.get_ondemand_programs(
+            _series, episodes = await self._client.get_ondemand_programs(
                 series_site_id, corner_site_id
             )
             if not episodes:
@@ -714,7 +714,7 @@ class NhkRadioProvider(MusicProvider):
         episode_key = ep.episode_id if ep.episode_id else str(index)
         item_id = f"od:{series_site_id}/{corner_site_id}/{episode_key}"
         duration = int((ep.end_at - ep.start_at).total_seconds())
-        artist_name = ep.act or ep.series_name
+        subtitle = ep.description or ep.series_name
         track = Track(
             item_id=item_id,
             provider=DOMAIN,
@@ -731,34 +731,15 @@ class NhkRadioProvider(MusicProvider):
                 [
                     ItemMapping(
                         media_type=MediaType.ARTIST,
-                        item_id=artist_name,
+                        item_id=subtitle,
                         provider=DOMAIN,
-                        name=artist_name,
+                        name=subtitle,
                     )
                 ]
             ),
         )
         track.metadata = self._build_metadata(ep.description, ep.thumbnail_url)
         return track
-
-    def _parse_series_radio_from_episode(
-        self, ep: OndemandProgram, item_id: str
-    ) -> Radio:
-        """Build a Radio item for a series using episode info."""
-        radio = Radio(
-            item_id=item_id,
-            provider=DOMAIN,
-            name=ep.series_name,
-            provider_mappings={
-                ProviderMapping(
-                    item_id=item_id,
-                    provider_domain=DOMAIN,
-                    provider_instance=self.instance_id,
-                )
-            },
-        )
-        radio.metadata = self._build_metadata(ep.title, ep.thumbnail_url)
-        return radio
 
     def _parse_series_radio(self, series: OndemandSeries) -> Radio:
         """Convert OndemandSeries to a Radio item."""
@@ -776,4 +757,5 @@ class NhkRadioProvider(MusicProvider):
             },
         )
         radio.metadata = self._build_metadata(series.description, series.thumbnail_url)
+        radio.metadata.label = "番組"
         return radio

@@ -126,10 +126,13 @@ def mock_nhk_client() -> AsyncMock:
         _make_ondemand_series("F684", "01", "シリーズA"),
         _make_ondemand_series("F685", "02", "シリーズB"),
     ]
-    client.get_ondemand_programs.return_value = [
-        _make_ondemand_program("ep001", "エピソード1"),
-        _make_ondemand_program("ep002", "エピソード2"),
-    ]
+    client.get_ondemand_programs.return_value = (
+        _make_ondemand_series("F684", "01", "テストシリーズ"),
+        [
+            _make_ondemand_program("ep001", "エピソード1"),
+            _make_ondemand_program("ep002", "エピソード2"),
+        ],
+    )
     client.search_ondemand.return_value = [
         _make_ondemand_series("F684", "01", "検索結果シリーズ"),
     ]
