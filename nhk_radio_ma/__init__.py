@@ -368,6 +368,16 @@ class NhkRadioProvider(MusicProvider):
         """Return recommendations for the Home screen."""
         items: UniqueList = UniqueList()
 
+        # Browse link
+        items.append(
+            BrowseFolder(
+                item_id="browse",
+                provider=DOMAIN,
+                name="すべての番組",
+                path=f"{DOMAIN}://",
+            )
+        )
+
         # Live channels
         live_programs = await self._client.get_live_programs()
         for info in live_programs.values():
@@ -402,9 +412,10 @@ class NhkRadioProvider(MusicProvider):
 
         return [
             RecommendationFolder(
-                item_id=f"{DOMAIN}://recommendations",
+                item_id="recommendations",
                 provider=DOMAIN,
                 name="NHK Radio",
+                path=f"{DOMAIN}://",
                 items=items,
             )
         ]
