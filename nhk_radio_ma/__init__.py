@@ -689,6 +689,12 @@ class NhkRadioProvider(MusicProvider):
                 msg = f"No episodes for series: {item_id}"
                 raise ValueError(msg)
             ep = episodes[0]
+            duration = int((ep.end_at - ep.start_at).total_seconds())
+            self.logger.info(
+                "Stream details for series %s: episodes=%d, "
+                "stream_url=%s, duration=%ds",
+                item_id, len(episodes), ep.stream_url, duration,
+            )
             return self._ondemand_stream_details(
                 item_id, ep, series.description
             )
@@ -701,6 +707,12 @@ class NhkRadioProvider(MusicProvider):
             )
             if result is not None:
                 ep, _i, _series = result
+                duration = int((ep.end_at - ep.start_at).total_seconds())
+                self.logger.info(
+                    "Stream details for episode %s: "
+                    "stream_url=%s, duration=%ds",
+                    item_id, ep.stream_url, duration,
+                )
                 return self._ondemand_stream_details(item_id, ep)
             msg = f"Episode not found: {item_id}"
             raise ValueError(msg)
@@ -758,9 +770,13 @@ class NhkRadioProvider(MusicProvider):
         parses encryption info and segment URLs.
         """
         # 1. Resolve master playlist → sub-playlist URL
-        async with session.get(master_url, timeout=_HLS_TIMEOUT) as resp:
-            resp.raise_for_status()
-            master_text = await resp.text()
+        try:
+            async with session.get(master_url, timeout=_HLS_TIMEOUT) as resp:
+                resp.raise_for_status()
+                master_text = await resp.text()
+        except aiohttp.ClientError:
+            self.logger.error("Failed to fetch master playlist: %s", master_url)
+            raise
 
         sub_url: str | None = None
         for line in master_text.splitlines():
@@ -836,21 +852,38 @@ class NhkRadioProvider(MusicProvider):
         master_url: str = streamdetails.data
         session = self.mass.http_session
 
+        self.logger.info(
+            "Audio stream start: item_id=%s, master_url=%s, seek=%d",
+            streamdetails.item_id, master_url, seek_position,
+        )
+
         key, iv, segments = await self._resolve_hls_segments(master_url, session)
+        self.logger.info(
+            "HLS resolved: segments=%d, encrypted=%s",
+            len(segments), key is not None,
+        )
 
         # Skip segments before seek position
         start_index = 0
         if seek_position > 0:
-            cumulative = 0.0
-            for i, (dur, _) in enumerate(segments):
-                if cumulative + dur > seek_position:
-                    start_index = i
-                    break
-                cumulative += dur
+            total_duration = sum(dur for dur, _ in segments)
+            if seek_position >= total_duration:
+                self.logger.warning(
+                    "Seek position %d exceeds total duration %.0f, "
+                    "starting from beginning",
+                    seek_position, total_duration,
+                )
             else:
-                start_index = len(segments)
+                cumulative = 0.0
+                for i, (dur, _) in enumerate(segments):
+                    if cumulative + dur > seek_position:
+                        start_index = i
+                        break
+                    cumulative += dur
 
         # Download, decrypt, and yield each segment
+        delivered = 0
+        failed = 0
         for seq, (_dur, seg_url) in enumerate(
             segments[start_index:], start=start_index
         ):
@@ -859,13 +892,23 @@ class NhkRadioProvider(MusicProvider):
                     resp.raise_for_status()
                     data = await resp.read()
             except aiohttp.ClientError:
-                self.logger.warning("Failed to download segment %d", seq)
+                failed += 1
+                self.logger.warning(
+                    "Failed to download segment %d: %s", seq, seg_url,
+                )
                 continue
 
             if key:
                 data = self._decrypt_segment(data, key, iv, seq)
 
+            delivered += 1
             yield data
+
+        self.logger.info(
+            "Audio stream finished: item_id=%s, "
+            "delivered=%d, failed=%d, total=%d",
+            streamdetails.item_id, delivered, failed, len(segments),
+        )
 
     # --- Radio Parsing Helpers ---
 
