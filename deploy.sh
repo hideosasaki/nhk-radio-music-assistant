@@ -44,7 +44,7 @@ done
 
 # Install SDK in MA's venv
 echo "Installing SDK..."
-docker_exec '/app/venv/bin/uv pip install --quiet --reinstall --no-deps "nhk-radio-python @ https://github.com/hideosasaki/nhk-radio-python/archive/refs/heads/main.tar.gz"'
+docker_exec '/app/venv/bin/uv pip install --quiet --reinstall --no-deps "nhk-radio-python @ git+https://github.com/hideosasaki/nhk-radio-python.git"'
 
 echo "Restarting container..."
 run_cmd "docker restart ${CONTAINER}"

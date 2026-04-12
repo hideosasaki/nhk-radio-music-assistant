@@ -1,0 +1,23 @@
+services:
+  homeassistant:
+    container_name: homeassistant
+    image: ghcr.io/home-assistant/home-assistant:stable
+    volumes:
+      - /opt/compose/homeassistant/config:/config
+      - /run/dbus:/run/dbus:ro
+    environment:
+      TZ: 'Asia/Tokyo'
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+
+  music-assistant:
+    container_name: music-assistant
+    build:
+      context: ./music-assistant
+      network: host
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /mnt/media:/media
+      - /mnt/media/ma-data:/data
