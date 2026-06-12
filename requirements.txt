@@ -11,7 +11,7 @@ mashumaro==3.20
 multidict==6.7.1
 music_assistant_models==1.1.106
 -e git+https://github.com/hideosasaki/nhk-radio-music-assistant.git@dad2240a2cef01c41d3aa88c8f5bb32c96d61a39#egg=nhk_radio_music_assistant
-nhk-radio-python @ git+https://github.com/hideosasaki/nhk-radio-python.git@01f018d1abf3d8532047e5858592e3eebcdb24ca
+nhk-radio-python @ git+https://github.com/hideosasaki/nhk-radio-python.git@b7cafffede74b20126e2717276f5ac886bd42254
 orjson==3.11.7
 packaging==26.0
 pluggy==1.6.0
